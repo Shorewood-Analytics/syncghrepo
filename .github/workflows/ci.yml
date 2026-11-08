@@ -44,6 +44,19 @@ jobs:
       - run: uv run pytest
       - run: uv audit --locked --preview-features audit-command
       - run: uv build
+      - name: Install built wheel and smoke test outside the checkout
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/syncghrepo-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/syncghrepo-bin
+        run: |
+          wheels=("$GITHUB_WORKSPACE"/dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          test -f "${wheels[0]}"
+          uv tool install --no-cache --python "$(cat .python-version)" "${wheels[0]}"
+          cd "$RUNNER_TEMP"
+          "$UV_TOOL_BIN_DIR/syncghrepo" --help
+          "$UV_TOOL_DIR/syncghrepo/bin/python" -I -m syncghrepo --help
+          "$UV_TOOL_DIR/syncghrepo/bin/python" -I -c 'from importlib.metadata import version; from importlib.resources import files; print(version("syncghrepo")); marker = files("syncghrepo").joinpath("py.typed"); assert marker.is_file(), "built wheel is missing py.typed"'
 
   shell:
     runs-on: ubuntu-latest
