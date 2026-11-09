@@ -53,8 +53,14 @@ jobs:
         id: guard
         run: |
           latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
-          if [ -n "$(git tag --points-at HEAD 'v*')" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
+          tag="$(git tag --points-at HEAD --list 'v*' --sort=-v:refname | head -1)"
+          if [ -n "$tag" ]; then
+            # Tagged by an earlier run. Done if its release exists; else publish it now.
+            if gh release view "$tag" > /dev/null; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            fi
           elif [ -n "$latest" ] && git merge-base --is-ancestor HEAD "$latest"; then
             # A re-run or late queue entry for an older commit: $latest already has it.
             echo "::notice::$GITHUB_SHA is already part of $latest; not releasing it again"
@@ -65,14 +71,20 @@ jobs:
       - name: Tag, test, build
         if: steps.guard.outputs.skip != 'true'
         id: tag
+        env:
+          TAGGED: ${{ steps.guard.outputs.tag }}
         run: |
           set -euo pipefail
-          latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
-          IFS=. read -r major minor _patch <<<"${latest#v}"
-          version="${major:-0}.$((${minor:-0} + 1)).0"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v$version" -m "v$version"
+          if [ -n "$TAGGED" ]; then
+            version="${TAGGED#v}"  # tag pushed by an earlier run whose release failed
+          else
+            latest="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+            IFS=. read -r major minor _patch <<<"${latest#v}"
+            version="${major:-0}.$((${minor:-0} + 1)).0"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "v$version" -m "v$version"
+          fi
           uv sync --locked
           uv run pytest
           uv audit --locked --preview-features audit-command
