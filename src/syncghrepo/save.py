@@ -117,6 +117,56 @@ def hold_reason(root: Path, rel: str, synced: set[Path] | None = None) -> str | 
     return None
 
 
+def blob_reason(git: Git, mode: str, blob: str) -> str | None:
+    """hold_reason's size and content rules for a committed file (git's mode and
+    blob id); the name is checked by the caller."""
+    if mode not in ("100644", "100755"):  # symlink or gitlink: no file content
+        return None
+    size = git.out("cat-file", "-s", blob)
+    if not size or not size.isdigit():
+        return "unreadable"
+    if int(size) > MAX_FILE_BYTES:
+        return f"larger than {MAX_FILE_BYTES // 2**20} MB"
+    data = git("cat-file", "blob", blob)
+    if not data.ok:
+        return "unreadable"
+    if SECRET_TEXT.search(data.out.encode("utf-8", "surrogateescape")):
+        return "contains a secret-looking string"
+    return None
+
+
+def unpushed_held_back(git: Git) -> list[dict] | None:
+    """Files added or changed by commits on HEAD that are on no remote and must not be
+    published, by the same rules as uncommitted files (held_back). A file removed by a
+    later commit still counts: the commit that added it would be pushed. None if git
+    could not list the commits."""
+    commits = git.out("rev-list", "HEAD", "--not", "--remotes")
+    if commits is None:
+        return None
+    found: dict[str, str] = {}
+    content: dict[tuple[str, str], str | None] = {}  # (mode, blob) -> reason
+    for sha in commits.split():
+        listed = git("diff-tree", "-r", "-z", "--root", "--no-commit-id", "--no-renames",
+                     "--diff-filter=AM", sha)  # fmt: skip
+        if not listed.ok:
+            return None
+        fields = listed.out.split("\0")  # ":<mode> <mode> <blob> <blob> <status>", <path>
+        for meta, rel in zip(fields[::2], fields[1::2], strict=False):
+            parts = meta.split()
+            if rel in found or len(parts) < 4:
+                continue
+            if SECRET_NAME.search(rel):
+                reason = "secret-looking file name"
+            else:
+                key = (parts[1], parts[3])
+                if key not in content:
+                    content[key] = blob_reason(git, *key)
+                reason = content[key]
+            if reason:
+                found[rel] = f"{reason}, in unpushed commit {sha[:7]}"
+    return [{"path": rel, "reason": reason} for rel, reason in sorted(found.items())]
+
+
 def host_tag() -> str:
     """Short, branch-safe host name: Bens-MacBook-Pro.local -> bens-macbook-pro."""
     name = socket.gethostname().split(".")[0].lower()

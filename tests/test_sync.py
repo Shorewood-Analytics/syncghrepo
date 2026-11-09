@@ -9,7 +9,7 @@ import pytest
 from conftest import GIT_SYNC, FakeRunner, commit, fake_token, git, remote_head
 
 from syncghrepo import save, sync
-from syncghrepo.run import Result
+from syncghrepo.run import Git, Result
 
 WIP = f"wip/{datetime.now().astimezone().strftime('%Y%m%d')}-{save.host_tag()}"
 # Anything that could lose work or rewrite published history. None of it may ever run.
@@ -167,6 +167,63 @@ def test_secret_hit_skips_the_whole_clone(origin, clone, monkeypatch):
     assert runner.git_sync_calls() == []
     assert not {"commit", "add", "fetch", "pull", "push", "switch"} & set(runner.git_subcommands())
     assert_safe(runner)
+
+
+def test_secret_in_a_never_pushed_commit_is_not_published(origin, clone):
+    # The same check as for uncommitted files, before git push -u publishes the
+    # branch's commits for the first time.
+    git(clone, "switch", "-q", "-c", "try-local")
+    commit(clone, "ok.py", "print('hi')\n")
+    commit(clone, "config.py", "TOKEN = '" + fake_token() + "'\n")
+    git(clone, "rm", "-q", "config.py")  # removed again, but still in a commit
+    git(clone, "commit", "-q", "-m", "remove it")
+    (clone / "more.txt").write_text("more\n")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "held-back", report["actions"]
+        (held,) = report["held_back"]
+        assert held["path"] == "config.py"
+        assert held["reason"].startswith("contains a secret-looking string, in unpushed commit ")
+    assert fake_token() not in str(result)
+    assert remote_head(origin, "try-local") is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+    assert config(clone, "branch.try-local.sync") is None
+
+
+def test_secret_in_a_local_commit_on_main_is_not_carried_to_a_wip_branch(origin, clone):
+    commit(clone, "deploy.pem", "not really a key\n")  # local commit, never pushed
+    (clone / "a.txt").write_text("small edit\n")  # work on main moves to wip/ ...
+
+    result, runner = apply(clone)
+
+    assert result["status"] == "held-back", result["actions"]
+    assert [h["path"] for h in result["held_back"]] == ["deploy.pem"]
+    assert result["held_back"][0]["reason"].startswith("secret-looking file name, in unpushed")
+    assert git(clone, "branch", "--show-current") == "main"
+    assert remote_head(origin, WIP) is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+
+
+def test_unpushed_scan_checks_names_sizes_and_only_unpushed_commits(origin, clone, monkeypatch):
+    monkeypatch.setattr(save, "MAX_FILE_BYTES", 100)
+    commit(clone, "fixture.pem", "already on the remote\n")
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "switch", "-q", "-c", "x")
+    commit(clone, "notes.txt", "same bytes\n")
+    commit(clone, ".env", "same bytes\n")  # same blob as notes.txt: still a name hit
+    commit(clone, "big.bin", "0" * 200)
+    commit(clone, "fixture.pem", "changed in an unpushed commit\n")
+
+    held = save.unpushed_held_back(Git(FakeRunner(), clone))
+
+    assert {h["path"]: h["reason"].split(",")[0] for h in held} == {
+        ".env": "secret-looking file name",
+        "big.bin": "larger than 0 MB",
+        "fixture.pem": "secret-looking file name",
+    }
 
 
 def test_ignored_files_are_never_committed(origin, clone):

@@ -3,7 +3,8 @@
 git-sync (simonthum/git-sync) does the actual auto-commit, fetch, fast-forward or
 rebase, and push; syncghrepo does not reimplement it. Around it, syncghrepo:
 
-- skips the clone if any changed file looks like a secret or is huge;
+- skips the clone if any changed file looks like a secret or is huge, or one in
+  the commits a new remote branch would publish for the first time;
 - never runs git-sync on the default branch: work found there moves to a new
   wip/<YYYYMMDD>-<host> branch, which is pushed and opted in; the default branch
   itself is only ever fast-forwarded;
@@ -223,6 +224,21 @@ def process(
             note=f"upstream {upstream} is not {remote}/{branch}; git-sync needs the same name",
         )
         return done()
+
+    # A new remote branch (git push -u, or a wip/ branch carrying the default branch's
+    # local commits) publishes commits that are on no remote yet: they get the same
+    # secret check as uncommitted files first.
+    if protected or not upstream:
+        unpushed = save.unpushed_held_back(git)
+        if unpushed is None:
+            act("git rev-list HEAD --not --remotes", ok=False, note="could not list them")
+            return done()
+        if unpushed:
+            report["held_back"] = unpushed
+            names = ", ".join(h["path"] for h in unpushed[:5])
+            return finish(
+                "held-back", f"files that must not be published, in unpushed commits ({names})"
+            )
 
     # git-sync's own read-only check: refuses staged changes, odd file states, ...
     # It runs before anything is changed, also on a branch with no remote yet (it
