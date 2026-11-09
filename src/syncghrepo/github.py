@@ -61,6 +61,12 @@ class GhError(RuntimeError):
     pass
 
 
+def not_found(error: str) -> bool:
+    """Whether a status query failed only because GitHub has no such repo for you
+    (deleted, renamed away or no longer visible), not because the query failed."""
+    return "Could not resolve to a Repository" in error or error.endswith(": not found")
+
+
 def gh(runner: Runner, *args: str) -> str:
     result = runner(["gh", *args], None)
     if not result.ok:

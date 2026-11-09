@@ -106,3 +106,41 @@ def test_api_fork_sync_failure_exits_2(tmp_path, capsys):
     (item,) = [i for i in report["items"] if i["kind"] == "fork_sync_failed"]
     assert item["id"] == "fork_sync_failed:benpshore/fork"
     assert "diverging" in item["detail"]
+
+
+RATE_LIMITED = Result(1, "", "gh: API rate limit exceeded for user ID 1. (HTTP 403)")
+
+
+def test_api_failed_github_queries_exit_2_and_forks_are_still_synced(capsys):
+    github = api_github()
+    github[("api", "graphql")] = RATE_LIMITED
+    runner = FakeRunner(github)
+
+    code = cli.main(["--api", "--json"], runner=runner)
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2  # not "all fine": nothing could be queried
+    kinds = {i["id"]: i["kind"] for i in report["items"]}
+    assert set(kinds.values()) == {"github_error"} and len(kinds) == 3
+    # benpshore/fork is yours and a fork per the repo listing: synced all the same.
+    assert [c for c in runner.calls if c[1:3] == ["repo", "sync"]] == [
+        ["gh", "repo", "sync", "benpshore/fork"]
+    ]
+    repos = {r["name"]: r for r in report["repos"]}
+    assert repos["benpshore/fork"]["fork_sync"]["ok"] is True
+    assert repos["benpshore/proj"]["fork_sync"] is None
+
+
+def test_api_repo_github_cannot_resolve_is_an_item_not_an_error(capsys):
+    github = api_github()
+    answer = github[("api", "graphql")]
+    gone = "gh: Could not resolve to a Repository with the name 'friend/shared'. (repository)"
+
+    def graphql(cmd):
+        return Result(1, "", gone) if "name=shared" in cmd else answer(cmd)
+
+    github[("api", "graphql")] = graphql
+    assert cli.main(["--api", "--json"], runner=FakeRunner(github)) == 0
+    report = json.loads(capsys.readouterr().out)
+    (item,) = [i for i in report["items"] if i["kind"] == "github_error"]
+    assert item["id"] == "github_error:friend/shared" and "Could not resolve" in item["detail"]

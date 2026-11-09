@@ -715,11 +715,13 @@ def build_api_report(args: argparse.Namespace, runner: Runner, now: float) -> di
         fetch_status(pool, runner, repos, plain, me)
         fetch_status(pool, runner, repos, mine, me, branches=True, stale_days=STALE_DAYS, now=now)
     for entry in repos.values():
-        remote = entry["remote"] or {}
+        # fork and archived come from the status query, else from the repo listing
+        # (when the query failed); a repo of yours can always be pushed to.
+        remote = entry["remote"]
         owner = entry["name"].partition("/")[0]
-        if not (remote.get("fork") and remote.get("can_push") and not remote.get("archived")):
-            continue
         if not me or owner.lower() != me.lower():
+            continue
+        if not (entry["fork"] and not entry["archived"] and (remote or {}).get("can_push", True)):
             continue
         cmd = f"gh repo sync {entry['name']}"
         if apply:
@@ -889,6 +891,11 @@ def exit_code(report: dict) -> int:
     """0 all fine, 1 needs attention, 2 an error."""
     clones = [clone for entry in report["repos"] for clone in entry["clones"]]
     if report["errors"] or any(c["status"] == "error" for c in clones):
+        return 2
+    # A GitHub query that failed (rate limit, network, auth): push access, forks and CI
+    # are unknown. A repo GitHub cannot find for you is only reported (github_error).
+    errors = [entry.get("remote_error") for entry in report["repos"]]
+    if any(error and not github.not_found(error) for error in errors):
         return 2
     if any((entry.get("fork_sync") or {}).get("ok") is False for entry in report["repos"]):
         return 2

@@ -365,3 +365,15 @@ def test_a_rejected_auto_commit_is_an_error_not_saved(origin, clone, capsys):
     assert any(i["kind"] == "error" for i in report["items"])
     assert code == 2
     assert git(clone, "rev-parse", "HEAD") == before == remote_head(origin, "feat")
+
+
+def test_failed_github_query_is_an_error(origin, clone, capsys):
+    point_origin_at_github(clone)
+    github = gh_replies()
+    github[("api", "graphql")] = Result(1, "", "gh: API rate limit exceeded (HTTP 403)")
+
+    code = cli.main(["--json"], runner=FakeRunner(github))
+
+    report = json.loads(capsys.readouterr().out)
+    assert {i["kind"] for i in report["items"]} == {"github_error"}
+    assert code == 2  # push access and CI are unknown: not "all fine"

@@ -152,8 +152,9 @@ gh-dash config. It:
 **It cannot save or sync local work**: uncommitted changes, unpushed commits, stashes
 and local branches are not seen at all. Run plain `syncghrepo` for that.
 `--api` works with `--json` (same schema, `mode` is `api`, every repo's `clones`
-is empty) and `--dry-run`. Exit status: 2 for an error or a failed fork sync, 1 for
-failing CI, else 0.
+is empty) and `--dry-run`. Exit status: 2 for an error, a failed GitHub query or a
+failed fork sync, 1 for failing CI, else 0. Your forks are synced even when their
+status query failed (the repo listing says they are forks).
 
 **Review UI.** Every run writes or refreshes a
 [gh-dash](https://github.com/dlvhdr/gh-dash) config with sections for your open
@@ -209,7 +210,9 @@ but not a guarantee.
 something needs attention: uncommitted work, a conflict, a held-back file, a clone
 mid-merge/rebase or detached (a clean submodule is fine), a repo of yours whose clone
 folder is taken, or failing CI on a default branch; 2 for an error (a
-step failed, `gh` or git-sync unusable, bad arguments).
+step failed, `gh` or git-sync unusable, a GitHub status query that failed, bad
+arguments). A repo that GitHub cannot resolve for you (deleted, renamed or no longer
+visible) is only reported, as a `github_error` item.
 
 The JSON report is documented below.
 
@@ -272,7 +275,7 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 | `pr` | `owner/name#N` | open pull request (all PRs in your repos; only yours and review requests elsewhere) |
 | `issue` | `owner/name#N` | open issue assigned to you |
 | `ci_failing` | `owner/name@branch` | CI failing or erroring on the default branch |
-| `github_error` | `owner/name` | the repo could not be queried |
+| `github_error` | `owner/name` | the repo could not be queried (exit 2, unless GitHub cannot resolve the repo for you) |
 | `conflict` | `path:branch` | pull aborted on conflicts that need a person; `detail` lists files and the backup ref |
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
