@@ -53,6 +53,11 @@ def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | Non
     return (ref, "backup before rebase") if made.ok else (None, made.last_line())
 
 
+def overwrites(upstream: str, lost: list[str]) -> str:
+    names = ", ".join(lost[:5]) + (" ..." if len(lost) > 5 else "")
+    return f"{upstream} adds files ignored here; updating would overwrite them: {names}"
+
+
 def process(
     runner: Runner,
     path: Path,
@@ -192,6 +197,8 @@ def process(
             )
         elif upstream and ahead:
             act("git push (skipped)", note=f"{ahead} local commit(s) on {branch} are not pushed")
+        elif upstream and behind and (lost := save.overwritten_ignored(git, path, upstream)):
+            act("git merge --ff-only (skipped)", note=overwrites(upstream, lost))
         elif upstream and behind:
             merged = None if dry_run else git("merge", "--ff-only", "--quiet", upstream)
             act(f"git merge --ff-only {upstream}", merged, f"fast-forward by {behind}", change=True)
@@ -236,6 +243,11 @@ def process(
                 "held-back",
                 f"secret-looking or oversized files in local commits ({names}); not pushed",
             )
+
+    # git-sync would fast-forward or rebase onto the upstream: the same ignored-file check.
+    if behind and not protected and (lost := save.overwritten_ignored(git, path, upstream)):
+        act("git-sync (skipped)", note=overwrites(upstream, lost))
+        return done()
 
     # git-sync's own read-only check: refuses staged changes, odd file states, ... A branch
     # with no remote yet (it gets origin below) is checked as if it had origin already.

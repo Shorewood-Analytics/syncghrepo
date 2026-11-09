@@ -11,7 +11,7 @@ import pytest
 from conftest import GIT_SYNC, FakeRunner, commit, fake_token, git, remote_head
 
 from syncghrepo import save, sync
-from syncghrepo.run import Result
+from syncghrepo.run import Git, Result
 
 WIP = f"wip/{datetime.now().astimezone().strftime('%Y%m%d')}-{save.host_tag()}"
 # Anything that could lose work or rewrite published history. None of it may ever run.
@@ -46,6 +46,10 @@ def config(repo, key):
         return git(repo, "config", "--get", key)
     except Exception:
         return None
+
+
+def git_in(repo):
+    return Git(FakeRunner(), repo)
 
 
 def cmds(result):
@@ -246,6 +250,65 @@ def test_ignored_files_are_never_committed(origin, clone):
     assert sorted(committed) == [".env.example", ".gitignore", "ok.py"]
     assert result["status"] == "updated"
     assert (clone / "debug.log").exists()
+
+
+@pytest.mark.parametrize("branch", ["main", "feat"])
+def test_ignored_local_files_are_never_overwritten_by_an_update(origin, clone, branch):
+    """git treats ignored files as expendable: a fast-forward or rebase that brings in a
+    file at an ignored path would silently replace the only local copy."""
+    commit(clone, ".gitignore", "settings.local.json\n")
+    git(clone, "push", "-q", "origin", "main")
+    if branch == "feat":
+        feature(clone)
+        commit(clone, "mine.txt", "local commit to push\n")
+    (clone / "settings.local.json").write_text('{"my": "only copy"}\n')
+    git(origin.seed, "fetch", "-q")
+    git(origin.seed, "switch", "-q", "-C", branch, f"origin/{branch}")
+    (origin.seed / "settings.local.json").write_text('{"template": true}\n')
+    git(origin.seed, "add", "-f", "settings.local.json")
+    git(origin.seed, "commit", "-q", "-m", "add a template")
+    git(origin.seed, "push", "-q", "origin", branch)
+    before = head(clone)
+
+    result, runner = apply(clone)
+
+    assert (clone / "settings.local.json").read_text() == '{"my": "only copy"}\n'
+    assert head(clone) == before
+    assert any("settings.local.json" in a["note"] for a in result["actions"]), result["actions"]
+    assert [] not in runner.git_sync_calls()
+    assert_safe(runner)
+
+
+def test_ignored_files_in_the_way_of_new_folders_and_files_are_found(origin, clone):
+    commit(clone, ".gitignore", "conf\ncache\nfree\n")
+    git(clone, "push", "-q", "origin", "main")
+    (clone / "conf").write_text("precious\n")  # upstream adds conf/x.json: a folder here
+    (clone / "cache").mkdir()
+    (clone / "cache" / "a").write_text("inside\n")  # upstream adds a file named cache
+    (clone / "free").mkdir()  # upstream adds free/new.txt: no file is replaced
+    git(origin.seed, "pull", "-q")
+    for name in ("conf/x.json", "cache", "free/new.txt"):
+        (origin.seed / name).parent.mkdir(exist_ok=True)
+        (origin.seed / name).write_text("{}\n")
+        git(origin.seed, "add", "-f", name)
+    git(origin.seed, "commit", "-q", "-m", "track them")
+    git(origin.seed, "push", "-q")
+    git(clone, "fetch", "-q")
+    assert save.overwritten_ignored(git_in(clone), clone, "origin/main") == ["cache/a", "conf"]
+
+
+def test_an_identical_ignored_file_does_not_block_the_update(origin, clone):
+    commit(clone, ".gitignore", "gen.json\n")
+    git(clone, "push", "-q", "origin", "main")
+    (clone / "gen.json").write_text("{}\n")
+    git(origin.seed, "fetch", "-q")
+    git(origin.seed, "switch", "-q", "-C", "main", "origin/main")
+    (origin.seed / "gen.json").write_text("{}\n")
+    git(origin.seed, "add", "-f", "gen.json")
+    git(origin.seed, "commit", "-q", "-m", "track gen.json")
+    git(origin.seed, "push", "-q", "origin", "main")
+    result, _ = apply(clone)
+    assert result["status"] == "updated" and head(clone) == remote_head(origin, "main")
 
 
 def test_too_many_files_is_not_auto_saved(origin, clone, monkeypatch):

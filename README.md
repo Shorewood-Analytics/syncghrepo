@@ -173,7 +173,10 @@ prints the `gh dash` command to run; syncghrepo never launches it.
 
 Clones in the middle of a merge or rebase, with a detached HEAD, or with no
 commits yet, are left alone and reported. Linked worktrees are listed but not
-synced. Nothing is ever reset, cleaned, force-pushed or discarded.
+synced. Nothing is ever reset, cleaned, force-pushed or discarded. git treats
+ignored files as expendable, so a fast-forward or rebase that would replace an
+ignored local file or folder (the upstream now tracks a file at or under that
+path) is not done and is reported (`not_pushed`), unless the file is identical.
 
 git-sync is found via `$SYNCGHREPO_GIT_SYNC`, `PATH`, then
 `~/.local/bin/git-sync`. Without it, clones with work are reported, not synced,
@@ -282,7 +285,7 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
 | `held_back` | `path:file` | secret-looking or oversized file, uncommitted or in a commit on no remote; the clone was not saved or pushed |
-| `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, or a branch git-sync cannot handle |
+| `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, an update that would overwrite ignored local files, or a branch git-sync cannot handle |
 | `unpushed_branch` | `path:branch` | another local branch with commits on no remote |
 | `gone_branch` | `path:branch` | local branch whose upstream was deleted (merged?) |
 | `stale_branch` | `path:branch` | no commits for 30 days |

@@ -79,6 +79,39 @@ def hold_reason(root: Path, rel: str) -> str | None:
     return None
 
 
+def overwritten_ignored(git: Git, root: Path, target: str) -> list[str]:
+    """Ignored local files that moving HEAD to target (fast-forward or rebase) would
+    replace or delete without a word: git treats ignored files as expendable. That
+    happens where target adds a file at their path (or below it, if it is a file).
+    An ignored file identical to target's copy is not in the way."""
+    added = git("diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", "HEAD", target)
+    in_the_way: set[str] = set()
+    for rel in filter(None, added.out.split("\0") if added.ok else []):
+        parts = rel.split("/")
+        for n in range(1, len(parts) + 1):
+            here = root.joinpath(*parts[:n])
+            if not (here.is_symlink() or here.exists()):
+                break  # nothing on disk here: nothing to overwrite
+            last = n == len(parts)
+            if last or here.is_symlink() or not here.is_dir():
+                if not (last and same_content(git, here, f"{target}:{rel}")):
+                    in_the_way.add("/".join(parts[:n]))
+                break
+    if not in_the_way:
+        return []
+    literal = [f":(literal){rel}" for rel in sorted(in_the_way)]
+    listed = git("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", *literal)
+    return sorted(set(filter(None, listed.out.split("\0")))) if listed.ok else sorted(in_the_way)
+
+
+def same_content(git: Git, path: Path, blob: str) -> bool:
+    """Whether a regular file holds exactly the blob (as git would store it)."""
+    if path.is_symlink() or not path.is_file():
+        return False
+    mine = git.out("hash-object", "--", str(path))
+    return bool(mine) and mine == git.out("rev-parse", "--verify", "--quiet", blob)
+
+
 def host_tag() -> str:
     """Short, branch-safe host name: Bens-MacBook-Pro.local -> bens-macbook-pro."""
     name = socket.gethostname().split(".")[0].lower()
