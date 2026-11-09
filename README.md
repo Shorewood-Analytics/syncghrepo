@@ -326,7 +326,9 @@ succeeded), `new_clones` (cloned, or would be with `--dry-run`), `clones_skipped
 - `remote` (object or null, from GitHub): `name`, `url`, `fork`, `archived`,
   `parent` (`owner/name` or null), `can_push`, `default_branch`, `ci` (`success`,
   `failure`, `error`, `pending`, `expected` or null), `ci_commit`, `open_prs` (total),
-  `assigned_issues_total`, `prs` and `assigned_issues` (first 50 each),
+  `assigned_issues_total`, `prs` and `assigned_issues` (first 50 each; when a repo
+  has more open PRs, yours and those requesting your review are added from a GitHub
+  search, so they are never cut off),
   `stale_branches` (`--api` only, else null): each `name`, `age_days`,
   `committed_at` (ISO 8601), `url`.
   - each PR: `number`, `title`, `url`, `author`, `mine`, `draft`,

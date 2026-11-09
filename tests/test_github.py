@@ -32,6 +32,7 @@ def status_payload(
     permission="ADMIN",
     archived=False,
     default="main",
+    total=None,
 ):
     return json.dumps(
         {
@@ -47,7 +48,10 @@ def status_payload(
                         "name": default,
                         "target": {"oid": "abcdef1234567", "statusCheckRollup": {"state": ci}},
                     },
-                    "pullRequests": {"totalCount": len(prs), "nodes": list(prs)},
+                    "pullRequests": {
+                        "totalCount": len(prs) if total is None else total,
+                        "nodes": list(prs),
+                    },
                     "issues": {"totalCount": len(issues), "nodes": list(issues)},
                 }
             }
@@ -145,6 +149,43 @@ def test_repo_status_for_contributed_repo_keeps_only_my_prs():
     runner = FakeRunner({("api", "graphql"): Result(0, status_payload("up/lib", prs=prs))})
     status = github.repo_status(runner, "up/lib", "benpshore", all_prs=False)
     assert [p["number"] for p in status["prs"]] == [1, 3]
+
+
+def busy_upstream(found_by_search):
+    """up/big has 400 open PRs; the status query lists the 50 most recently updated,
+    none of them Ben's. The search query finds found_by_search (mine, requested)."""
+    others = [pr(1000 + n, f"user{n}") for n in range(50)]
+
+    def graphql(cmd):
+        query = next(a for a in cmd if a.startswith("query="))
+        if "search(" in query:
+            mine, requested = found_by_search
+            data = {"mine": {"nodes": mine}, "requested": {"nodes": [*requested, {}]}}
+            return Result(0, json.dumps({"data": data}))
+        return Result(0, status_payload("up/big", prs=others, total=400))
+
+    return graphql
+
+
+def test_my_prs_and_review_requests_beyond_the_first_50_are_found():
+    found = ([pr(7)], [pr(8, "stranger", requested=["benpshore"]), pr(7)])
+    runner = FakeRunner({("api", "graphql"): busy_upstream(found)})
+
+    contributed = github.repo_status(runner, "up/big", "benpshore", all_prs=False)
+
+    assert [p["number"] for p in contributed["prs"]] == [7, 8]
+    assert contributed["open_prs"] == 400
+    search = runner.calls[1]
+    assert "mine=repo:up/big is:pr is:open author:benpshore" in search
+    assert "requested=repo:up/big is:pr is:open review-requested:benpshore" in search
+    involved = github.repo_status(runner, "up/big", "benpshore")
+    assert len(involved["prs"]) == 52 and {7, 8} <= {p["number"] for p in involved["prs"]}
+
+
+def test_no_search_when_every_open_pr_is_listed():
+    runner = FakeRunner({("api", "graphql"): Result(0, status_payload(prs=[pr(1)]))})
+    github.repo_status(runner, "benpshore/proj", "benpshore")
+    assert len(runner.calls) == 1
 
 
 def ref(name, date, *, open_prs=0):

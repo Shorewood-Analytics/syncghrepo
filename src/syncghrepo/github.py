@@ -32,6 +32,19 @@ query($owner: String!, $name: String!, $me: String!) {
 }
 """
 
+# Your open PRs and PRs requesting your review in one repo, found by GitHub search:
+# asked only when the status query's first 50 open PRs are not all of them.
+SEARCH_QUERY = """
+query($mine: String!, $requested: String!) {
+  mine: search(type: ISSUE, query: $mine, first: 50) { nodes { ...pr } }
+  requested: search(type: ISSUE, query: $requested, first: 50) { nodes { ...pr } }
+}
+fragment pr on PullRequest {
+  number title url isDraft updatedAt reviewDecision author { login }
+  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
+}
+"""
+
 
 # Every branch on GitHub (--api mode only), all pages: one JSON line per branch.
 BRANCHES_QUERY = """
@@ -164,6 +177,20 @@ def stale_branches(
     return sorted(found, key=lambda branch: branch["name"])
 
 
+def my_open_prs(runner: Runner, name: str, me: str) -> list[dict]:
+    """Open PRs in name that me opened or is asked to review (as PR nodes)."""
+    scope = f"repo:{name} is:pr is:open"
+    raw = gh(runner, "api", "graphql", "-f", f"query={SEARCH_QUERY}",
+             "-f", f"mine={scope} author:{me}",
+             "-f", f"requested={scope} review-requested:{me}")  # fmt: skip
+    data = json.loads(raw).get("data") or {}
+    return [
+        node
+        for found in ("mine", "requested")
+        for node in (data.get(found) or {}).get("nodes") or []
+    ]
+
+
 def repo_status(
     runner: Runner,
     name: str,
@@ -201,8 +228,17 @@ def repo_status(
     commit = ref.get("target") or {}
     rollup = commit.get("statusCheckRollup") or {}
 
+    nodes = list(data["pullRequests"]["nodes"])
+    if data["pullRequests"]["totalCount"] > len(nodes):
+        # Only the 50 most recently updated are listed: yours and your review
+        # requests may be older, so ask GitHub search for those.
+        nodes += my_open_prs(runner, data["nameWithOwner"], me)
     prs = []
-    for node in data["pullRequests"]["nodes"]:
+    seen: set[int] = set()
+    for node in nodes:
+        if not node.get("number") or node["number"] in seen:
+            continue
+        seen.add(node["number"])
         author = (node.get("author") or {}).get("login") or "ghost"
         requested = any(
             ((req.get("requestedReviewer") or {}).get("login") or "").lower() == me.lower()

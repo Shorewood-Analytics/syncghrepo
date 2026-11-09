@@ -5,7 +5,7 @@ import os
 
 from conftest import FakeRunner, git
 from test_cli import point_origin_at_github
-from test_github import branch_lines, pr, ref, repo_line, status_payload
+from test_github import branch_lines, busy_upstream, pr, ref, repo_line, status_payload
 from test_schema import FORK_SYNC, REMOTE_BRANCH
 
 from syncghrepo import cli, dash
@@ -144,3 +144,17 @@ def test_api_repo_github_cannot_resolve_is_an_item_not_an_error(capsys):
     report = json.loads(capsys.readouterr().out)
     (item,) = [i for i in report["items"] if i["kind"] == "github_error"]
     assert item["id"] == "github_error:friend/shared" and "Could not resolve" in item["detail"]
+
+
+def test_api_lists_my_pr_in_a_busy_repo_i_contributed_to(capsys):
+    # gh search prs found a PR of mine in up/big, older than its 50 latest open PRs.
+    github = {
+        ("api", "user"): Result(0, "benpshore\n"),
+        ("api", "--paginate"): Result(0, ""),
+        ("search", "prs"): Result(0, "up/big\n"),
+        ("api", "graphql"): busy_upstream(([pr(7)], [])),
+    }
+    cli.main(["--api", "--json"], runner=FakeRunner(github))
+    report = json.loads(capsys.readouterr().out)
+    assert [i["id"] for i in report["items"]] == ["pr:up/big#7"]
+    assert report["summary"]["open_prs"] == 1
