@@ -39,12 +39,12 @@ ITEM = {"id", "kind", "repo", "title", "url", "path", "branch", "flags", "update
 KINDS = {"pr", "issue", "ci_failing", "github_error", "conflict", "error", "skipped",
          "held_back", "not_pushed", "unpushed_branch", "gone_branch", "stale_branch", "stash",
          "worktree", "remote_stale_branch", "fork_sync_failed", "clone_skipped",
-         "save_skipped"}  # fmt: skip
+         "save_skipped", "prs_not_listed"}  # fmt: skip
 REPO = {"name", "url", "github", "fork", "archived", "default_branch", "sources", "clones",
         "remote", "remote_error", "attention", "fork_sync"}  # fmt: skip
 REMOTE = {"name", "url", "fork", "archived", "parent", "can_push", "default_branch", "ci",
-          "ci_commit", "open_prs", "prs", "assigned_issues", "assigned_issues_total",
-          "stale_branches"}  # fmt: skip
+          "ci_commit", "open_prs", "prs", "prs_not_listed", "assigned_issues",
+          "assigned_issues_total", "stale_branches"}  # fmt: skip
 PR = {"number", "title", "url", "author", "mine", "draft", "review_decision",
       "review_requested", "needs_review", "updated_at"}  # fmt: skip
 ISSUE = {"number", "title", "url", "updated_at"}

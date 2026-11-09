@@ -167,8 +167,8 @@ def attention(entry: dict) -> list[str]:
             ]
             by = "" if pr["mine"] else f" by {pr['author']}"
             items.append(f"PR #{pr['number']}{by} [{', '.join(tags) or 'open'}]: {pr['title']}")
-        if remote["open_prs"] > len(remote["prs"]) and involved(entry):
-            items.append(f"{remote['open_prs'] - len(remote['prs'])} more open PR(s) not listed")
+        if remote["prs_not_listed"]:
+            items.append(f"{remote['prs_not_listed']} more open PR(s) not listed")
         for issue in remote["assigned_issues"]:
             items.append(f"issue #{issue['number']} assigned to me: {issue['title']}")
         if involved(entry):
@@ -244,6 +244,17 @@ def work_items(repos: list[dict]) -> list[dict]:
                         flags=flags,
                         updated_at=pr["updated_at"],
                         detail=f"by {pr['author']}",
+                    )
+                )
+            if remote["prs_not_listed"]:  # GitHub returned only the first 50
+                items.append(
+                    item(
+                        "prs_not_listed",
+                        name,
+                        repo,
+                        f"{remote['prs_not_listed']} more open PR(s) not listed",
+                        url=f"{remote['url']}/pulls",
+                        detail=f"{remote['open_prs']} open, {len(remote['prs'])} listed",
                     )
                 )
             for issue in remote["assigned_issues"]:

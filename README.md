@@ -286,8 +286,9 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 
 | kind | key in `id` | what it means |
 | --- | --- | --- |
-| `pr` | `owner/name#N` | open pull request (all PRs in your repos; only yours and review requests elsewhere) |
-| `issue` | `owner/name#N` | open issue assigned to you |
+| `pr` | `owner/name#N` | open pull request (in your repos the 50 most recently updated, plus yours and review requests; only yours and review requests elsewhere) |
+| `prs_not_listed` | `owner/name` | open PRs that belong in the `pr` items but that GitHub did not return (a repo of yours with more than 50 open PRs; elsewhere, more than 50 of yours or review requests); `title` says how many, `url` is the repo's PR list |
+| `issue` | `owner/name#N` | open issue assigned to you (all of them) |
 | `ci_failing` | `owner/name@branch` | CI failing or erroring on the default branch |
 | `github_error` | `owner/name` | the repo could not be queried (exit 2, unless GitHub cannot resolve the repo for you) |
 | `conflict` | `path:branch` | pull aborted on conflicts that need a person; `detail` lists files and the backup ref |
@@ -327,9 +328,12 @@ succeeded), `new_clones` (cloned, or would be with `--dry-run`), `clones_skipped
 - `remote` (object or null, from GitHub): `name`, `url`, `fork`, `archived`,
   `parent` (`owner/name` or null), `can_push`, `default_branch`, `ci` (`success`,
   `failure`, `error`, `pending`, `expected` or null), `ci_commit`, `open_prs` (total),
-  `assigned_issues_total`, `prs` and `assigned_issues` (first 50 each; when a repo
-  has more open PRs, yours and those requesting your review are added from a GitHub
-  search, so they are never cut off),
+  `assigned_issues_total`, `assigned_issues` (all of them: past the first 50, the
+  rest are paged in), `prs` (the 50 most recently updated; when a repo has more open
+  PRs, yours and those requesting your review are added from a GitHub search, up to
+  50 of each), `prs_not_listed` (int: open PRs that belong in `prs` but are not in
+  it, in your repos any beyond those, elsewhere yours and review requests past the
+  search's 50; a `prs_not_listed` item when not 0),
   `stale_branches` (`--api` only, else null): each `name`, `age_days`,
   `committed_at` (ISO 8601), `url`.
   - each PR: `number`, `title`, `url`, `author`, `mine`, `draft`,
