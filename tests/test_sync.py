@@ -615,3 +615,37 @@ def test_busy_or_detached_clones_are_left_alone(origin, clone, state):
     assert result["status"] == "skipped"
     assert runner.git_sync_calls() == []
     assert (clone / "a.txt").read_text() == "edit\n"
+
+
+# Which changed_paths() status calls fail (1: secret check, 2: file limit after the
+# fetch), and the untracked file that must not reach the remote. The submodule scan's
+# porcelain=v2 status is left alone.
+@pytest.mark.parametrize(("fail", "name"), [({1, 2}, ".env"), ({1}, ".env"), ({2}, "x.txt")])
+def test_failed_change_list_skips_the_clone(origin, clone, fail, name):
+    """If git status cannot list the changed files (before or after the fetch), the
+    secret check and the file limit cannot run: the clone is an error and nothing is
+    committed or pushed."""
+    feature(clone)
+    commit(clone, "c.txt", "local\n")
+    (clone / name).write_text("X=1\n")
+    before = remote_head(origin, "feat")
+    local_before = git(clone, "rev-parse", "HEAD")
+    calls = []
+
+    def status_fails(cmd):
+        if "status" in cmd and "--porcelain=v1" in cmd and "--untracked-files=all" in cmd:
+            calls.append(cmd)
+            if len(calls) in fail:
+                return Result(124, "", "git timed out after 120s")
+        return None
+
+    result, runner = apply(clone, FakeRunner(git_hook=status_fails))
+    assert result["status"] == "error" and "git status failed" in result["note"]
+    assert result["actions"][-1]["ok"] is False
+    assert "git status failed" in result["actions"][-1]["note"]
+    assert runner.git_sync_calls() == []
+    assert git(clone, "rev-parse", "HEAD") == local_before
+    assert ("fetch" in runner.git_subcommands()) == (1 not in fail)
+    assert remote_head(origin, "feat") == before
+    assert name not in git(origin.bare, "ls-tree", "--name-only", "feat")
+    assert_safe(runner)

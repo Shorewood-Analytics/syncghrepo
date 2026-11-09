@@ -31,6 +31,8 @@ from .run import Git, Result, Runner
 
 BACKUP_PREFIX = "refs/syncghrepo/backup"
 OPT_IN = ("sync", "syncNewFiles")
+STATUS_FAILED = "git status failed; secret check and file limit not run, clone left alone"
+STATUS_CMD = "git status --porcelain=v1 -z --untracked-files=all"
 
 
 def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | None, str]:
@@ -154,7 +156,12 @@ def process(
 
     # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
     submodules = save.changed_submodules(git) or {}
-    report["held_back"] = save.held_back(git, path, synced, submodules)
+    # If git status fails the check cannot run, so the clone is skipped too.
+    held = save.held_back(git, path, synced, submodules)
+    if held is None:
+        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
+        return finish("error", STATUS_FAILED)
+    report["held_back"] = held
     if report["held_back"]:
         files = ", ".join(h["path"] for h in report["held_back"][:5])
         return finish(
@@ -173,7 +180,11 @@ def process(
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
     # A submodule with only its own files changed: nothing the parent can commit.
-    files = [f for f in save.changed_paths(git) or [] if f not in submodules]
+    listed = save.changed_paths(git)
+    if listed is None:
+        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
+        return finish("error", STATUS_FAILED)
+    files = [f for f in listed if f not in submodules]
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (
             f"{len(files)} files changed (over {save.MAX_FILES}; missing .gitignore?)"

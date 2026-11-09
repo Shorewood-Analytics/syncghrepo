@@ -200,11 +200,16 @@ def held_back(
     root: Path,
     synced: set[Path] | None = None,
     submodules: dict[str, bool] | None = None,
-) -> list[dict]:
+) -> list[dict] | None:
     """Changed files that must never be committed: secret-looking or too large, a
     nested repo, or a submodule moved to another commit. A submodule whose own files
-    changed is not held back: git add -A in the parent does not commit them."""
-    paths = changed_paths(git) or []
+    changed is not held back: git add -A in the parent does not commit them.
+
+    None if git status failed: the check could not run, so nothing is safe to commit.
+    """
+    paths = changed_paths(git)
+    if paths is None:
+        return None
     subs = changed_submodules(git) if submodules is None else submodules
     found = []
     for rel in paths:
