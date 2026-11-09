@@ -30,6 +30,7 @@ from .run import Git, Result, Runner
 
 BACKUP_PREFIX = "refs/syncghrepo/backup"
 OPT_IN = ("sync", "syncNewFiles")
+STATUS_FAILED = "git status failed; secret check and file limit not run, clone left alone"
 
 
 def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | None, str]:
@@ -144,7 +145,11 @@ def process(
         return finish("skipped", f"no commits yet on {info['branch']}; left alone")
 
     # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
-    report["held_back"] = save.held_back(git, path)
+    # If git status fails the check cannot run, so the clone is skipped too.
+    held = save.held_back(git, path)
+    if held is None:
+        return finish("error", STATUS_FAILED)
+    report["held_back"] = held
     if report["held_back"]:
         files = ", ".join(h["path"] for h in report["held_back"][:5])
         return finish("held-back", f"secret-looking or oversized files ({files}); clone skipped")
@@ -160,7 +165,9 @@ def process(
         info = inspect()
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
-    files = save.changed_paths(git) or []
+    files = save.changed_paths(git)
+    if files is None:
+        return finish("error", STATUS_FAILED)
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (
             f"{len(files)} files changed (over {save.MAX_FILES}; missing .gitignore?)"

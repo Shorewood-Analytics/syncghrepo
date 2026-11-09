@@ -97,7 +97,12 @@ def wip_branch(git: Git, day: str) -> str:
     raise RuntimeError("no free wip branch name")
 
 
-def held_back(git: Git, root: Path) -> list[dict]:
-    """Changed files that must never be committed: secret-looking or too large."""
-    paths = changed_paths(git) or []
+def held_back(git: Git, root: Path) -> list[dict] | None:
+    """Changed files that must never be committed: secret-looking or too large.
+
+    None if git status failed: the check could not run, so nothing is safe to commit.
+    """
+    paths = changed_paths(git)
+    if paths is None:
+        return None
     return [{"path": p, "reason": r} for p in paths if (r := hold_reason(root, p))]
