@@ -173,6 +173,9 @@ def host_tag() -> str:
     return re.sub(r"[^a-z0-9-]+", "-", name).strip("-") or "host"
 
 
+WIP_NAME = re.compile(r"^wip/\d{8}-")  # the branches wip_branch names
+
+
 def wip_branch(git: Git, day: str) -> str:
     """wip/<YYYYMMDD>-<host>, plus -N if that name is taken locally or on origin."""
     for n in range(1, 1000):

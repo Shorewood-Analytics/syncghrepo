@@ -59,7 +59,9 @@ it and reports what happened:
    GitHub reports it, and as the clone's `origin/HEAD` says, which can be missing or
    stale) or on `main`/`master`. Uncommitted work found there moves to a new
    `wip/<YYYYMMDD>-<host>` branch (`-2`, `-3`, ... if taken), which is pushed so it
-   has the same-named remote branch git-sync needs. The default branch itself is
+   has the same-named remote branch git-sync needs. A `wip/` branch that never got
+   its remote branch because the name was taken on GitHub meanwhile is renamed to
+   the next free name first. The default branch itself is
    only fast-forwarded (`git merge --ff-only`, or `git fetch . origin/main:main`
    when it is not checked out); local commits on it are reported, never pushed.
 3. **Opt in.** Only for a branch with something to sync, and only if GitHub says
@@ -200,7 +202,8 @@ SYNCGHREPO_ROOTS=~/code/GitHub/proj syncghrepo   # one clone (colon-separated li
 Environment: `SYNCGHREPO_ROOTS` (folders of clones, colon-separated, instead of
 ghq + `~/code`); `SYNCGHREPO_GIT_SYNC` (the git-sync to run). Fixed settings: roots
 are searched 3 levels deep, a branch is stale after 30 days without commits, each
-command times out after 120 s, and 8 clones are processed in parallel.
+command times out after 120 s, and 8 clones are processed in parallel (clones of
+the same repo one after another, so they never pick the same `wip/` name).
 
 From a checkout: `uv run syncghrepo`. In a Makefile:
 

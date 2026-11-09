@@ -348,3 +348,22 @@ def test_an_untracked_nested_repo_that_is_not_synced_is_not_called_synced(
     assert report["nested"] == []  # not discovered, so not synced
     top = parent_clone(report, clone)
     assert top["held_back"] == [{"path": "vendor/inner/", "reason": save.NESTED_UNSYNCED}]
+
+
+def test_two_nested_clones_of_one_repo_are_both_processed(tmp_path, origin, clone, capsys):
+    point_origin_at_github(clone)
+    inner_bare, first = nested_clone(tmp_path, clone, "tools/a", "inner")
+    second = clone / "tools" / "b"
+    git(tmp_path, "clone", "-q", str(inner_bare), str(second))
+    point_origin_at_github(second, "benpshore/inner")
+    with (clone / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("/tools/b/\n")
+    replies = fake_github({"benpshore/proj": origin.bare, "benpshore/inner": inner_bare})
+
+    cli.main(["--dry-run", "--json"], runner=FakeRunner(replies))
+
+    report = json.loads(capsys.readouterr().out)
+    paths = [str(first.resolve()), str(second.resolve())]
+    assert [entry["path"] for entry in report["nested"]] == paths
+    inner = {r["name"]: r for r in report["repos"]}["benpshore/inner"]
+    assert sorted(c["path"] for c in inner["clones"]) == paths

@@ -259,6 +259,20 @@ def process(
         if switched is not None and not switched.ok:
             return done()
         branch, upstream, behind, pending = target, None, 0, 0
+    elif not upstream and save.WIP_NAME.match(branch):
+        # A wip/ branch left without its remote branch because another clone of the
+        # repo pushed that name first (its push -u is rejected): take a free name.
+        theirs = f"refs/remotes/origin/{branch}"
+        if (
+            git("show-ref", "--quiet", "--verify", theirs).ok
+            and not git("merge-base", "--is-ancestor", theirs, "HEAD").ok
+        ):
+            target = save.wip_branch(git, moment.strftime("%Y%m%d"))
+            renamed = None if dry_run else git("branch", "-m", target)
+            act(f"git branch -m {target}", renamed, f"{branch} is taken on origin", change=True)
+            if renamed is not None and not renamed.ok:
+                return done()
+            branch = target
     if not upstream:  # git-sync needs a same-named remote branch: create it
         pushed = (
             None if dry_run else git("push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}")

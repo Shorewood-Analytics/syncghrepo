@@ -616,6 +616,9 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             nested.update(runner, result, dry_run=not apply)
         return result
 
+    def run_in_turn(todo: list[tuple[Path, dict | None]], key: str) -> list[dict]:
+        return [run_clone(path, key, info) for path, info in todo]
+
     nested_report: list[dict] = []
     with ThreadPoolExecutor(max_workers=JOBS) as pool:
         if apply:
@@ -638,13 +641,15 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             for path, _ in clone_keys
         }
         for level in sorted(set(levels.values())):
-            jobs = [
-                (key, pool.submit(run_clone, path, key))
-                for path, key in clone_keys
-                if levels[path] == level
-            ]
+            # Clones of the same repo run one after another: they share its remote,
+            # so each sees the wip/ branch the one before pushed.
+            groups: dict[str, list] = {}
+            for path, key in clone_keys:
+                if levels[path] == level:
+                    groups.setdefault(key, []).append((path, None))
+            jobs = [(key, pool.submit(run_in_turn, todo, key)) for key, todo in groups.items()]
             for key, job in jobs:
-                repos[key]["clones"].append(job.result())
+                repos[key]["clones"].extend(job.result())
 
         # Nested repos, after their parents (whose submodule update may add some),
         # level by level so a repo and one inside it are never processed at once.
@@ -663,23 +668,25 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
         fetch_status(pool, runner, repos, new, me)
         infos = [info for info, _ in nested_keys]
         for level in sorted({local.nesting_level(i["path"], infos) for i in infos}):
+            groups = {}
+            for info, key in nested_keys:
+                if local.nesting_level(info["path"], infos) == level:
+                    groups.setdefault(key, []).append((info["path"], info))
             batch = [
-                (info, key, pool.submit(run_clone, info["path"], key, info))
-                for info, key in nested_keys
-                if local.nesting_level(info["path"], infos) == level
+                (key, todo, pool.submit(run_in_turn, todo, key)) for key, todo in groups.items()
             ]
-            for info, key, job in batch:
-                result = job.result()
-                repos[key]["clones"].append(result)
-                nested_report.append(
-                    {
-                        "path": str(info["path"]),
-                        "parent": str(info["parent"]),
-                        "repo": repos[key]["name"],
-                        "submodule": info["submodule"],
-                        "status": result["status"],
-                    }
-                )
+            for key, todo, job in batch:
+                for (_, info), result in zip(todo, job.result(), strict=True):
+                    repos[key]["clones"].append(result)
+                    nested_report.append(
+                        {
+                            "path": str(info["path"]),
+                            "parent": str(info["parent"]),
+                            "repo": repos[key]["name"],
+                            "submodule": info["submodule"],
+                            "status": result["status"],
+                        }
+                    )
 
     ordered, items, summary, generated_at = finish_report(repos, now, records)
     summary["new_clones"] = sum(r["status"] in ("cloned", "would-clone") for r in records)

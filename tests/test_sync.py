@@ -112,6 +112,25 @@ def test_second_wip_branch_the_same_day_gets_a_suffix(origin, clone):
     assert result["saved"]["branch"] == f"{WIP}-2"
 
 
+def test_a_wip_branch_whose_name_is_taken_on_origin_is_renamed_then_pushed(origin, clone):
+    # Left by an earlier run: the clone moved to wip/..., but another clone of the
+    # repo had pushed that name first, so its push -u is rejected on every run.
+    git(origin.seed, "switch", "-q", "-c", WIP)
+    theirs = commit(origin.seed, "theirs.txt", "other clone\n")
+    git(origin.seed, "push", "-q", "origin", WIP)
+    git(clone, "fetch", "-q")
+    git(clone, "switch", "-q", "-c", WIP, "main")  # no upstream
+    (clone / "mine.txt").write_text("mine\n")
+
+    result, _ = apply(clone)
+
+    assert result["status"] == "updated", result["actions"]
+    assert result["branch"] == f"{WIP}-2"
+    assert remote_head(origin, f"{WIP}-2") == head(clone)
+    assert remote_head(origin, WIP) == theirs  # never overwritten
+    assert "mine.txt" in git(clone, "show", "--name-only", "--format=", "HEAD").split()
+
+
 def test_main_fast_forwards_while_work_moves_to_wip(origin, clone):
     (clone / "a.txt").write_text("edited\n")
     new = origin.advance()

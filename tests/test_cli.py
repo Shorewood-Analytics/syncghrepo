@@ -377,3 +377,24 @@ def test_failed_github_query_is_an_error(origin, clone, capsys):
     report = json.loads(capsys.readouterr().out)
     assert {i["kind"] for i in report["items"]} == {"github_error"}
     assert code == 2  # push access and CI are unknown: not "all fine"
+
+
+def test_two_clones_of_one_repo_get_their_own_wip_branches(tmp_path, origin, clone, capsys):
+    second = tmp_path / "code" / "other" / "proj"
+    second.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "-q", str(origin.bare), str(second))
+    for path, name in ((clone, "one.txt"), (second, "two.txt")):
+        point_origin_at_github(path)
+        (path / name).write_text("work on main\n")  # both on main, the same day
+
+    cli.main(["--json"], runner=FakeRunner(gh_replies()))
+
+    report = json.loads(capsys.readouterr().out)
+    proj = {r["name"]: r for r in report["repos"]}["benpshore/proj"]
+    assert [c["status"] for c in proj["clones"]] == ["updated", "updated"], proj["attention"]
+    branches = {c["branch"] for c in proj["clones"]}
+    assert branches == {WIP, f"{WIP}-2"}
+    for path in (clone, second):
+        assert remote_head(origin, git(path, "branch", "--show-current")) == git(
+            path, "rev-parse", "HEAD"
+        )
