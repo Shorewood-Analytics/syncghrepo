@@ -50,11 +50,19 @@ it and reports what happened:
    `.envrc`, keys, `credentials*`, databases, ...), contains a secret-looking
    string (GitHub/AWS/Slack/OpenAI/Google tokens, private keys) or is over 50 MB,
    the whole clone is skipped and the files are reported. Over 2,000 changed files
-   (a missing `.gitignore`?) is skipped too.
-2. **Never the default branch.** git-sync never runs on the default branch (or
-   `main`/`master`). Uncommitted work found there moves to a new
+   (a missing `.gitignore`?) is skipped too. Before a branch gets a new remote
+   branch (a local-only branch's first push, or a `wip/` branch that carries the
+   default branch's local commits), the files added or changed by its commits that
+   are on no remote yet (merge commits' own changes and file type changes
+   included) are checked the same way. Commits on a branch that is
+   already pushed are pushed by git-sync without this check.
+2. **Never the default branch.** git-sync never runs on the default branch (as
+   GitHub reports it, and as the clone's `origin/HEAD` says, which can be missing or
+   stale) or on `main`/`master`. Uncommitted work found there moves to a new
    `wip/<YYYYMMDD>-<host>` branch (`-2`, `-3`, ... if taken), which is pushed so it
-   has the same-named remote branch git-sync needs. The default branch itself is
+   has the same-named remote branch git-sync needs. A `wip/` branch that never got
+   its remote branch because the name was taken on GitHub meanwhile is renamed to
+   the next free name first. The default branch itself is
    only fast-forwarded (`git merge --ff-only`, or `git fetch . origin/main:main`
    when it is not checked out); local commits on it are reported, never pushed.
 3. **Opt in.** Only for a branch with something to sync, and only if GitHub says
@@ -64,8 +72,9 @@ it and reports what happened:
    is first pushed with `-u`. Branches whose upstream was deleted (merged PRs) are
    not recreated. Clean, in-sync clones are not touched, not even their config.
 4. **git-sync check first.** `git-sync -s -n check` (read-only) runs before
-   anything is changed, so a clone it would refuse (staged changes, a merge in
-   progress, ...) is left untouched and its message reported.
+   anything is changed, also on a branch that has no remote branch yet, so a clone
+   it would refuse (staged changes, a merge in progress, ...) is left untouched and
+   its message reported.
 5. **Backup, then git-sync.** If the branch is behind its upstream and has local
    work, a backup ref of HEAD plus any uncommitted files is made first:
    `refs/syncghrepo/backup/<YYYYMMDDTHHMMSS>` (reused when a backup of the same
@@ -127,11 +136,17 @@ nested repos; they are listed under their main clone.
   recorded commit. It is skipped (and the reason noted) if it could move local work:
   a submodule on a branch, with uncommitted changes, with commits on no remote, or
   in a merge conflict. A submodule on a detached HEAD with nothing unsaved is
-  `up-to-date`, not `skipped`.
+  `up-to-date`, not `skipped`. Files changed inside a submodule do not hold back
+  its parent (the parent's `git add -A` never commits them). A submodule checked out
+  at another commit than the parent records does (`held_back` reason "a submodule at
+  another commit ..."): `git add -A` would commit that commit as the new pointer,
+  which could undo a pointer update the parent pulled, so a person decides.
 - **Untracked nested clones.** A nested clone that the parent does not ignore would
   be embedded by `git add -A` as a gitlink, so the parent is held back (`held_back`
   reason "a nested git repo") until the folder is in `.gitignore` or made a
-  submodule. The nested clone itself is still synced.
+  submodule. The nested clone itself is still synced, unless it is in a hidden or
+  build folder or more than 4 levels down, where nested repos are not searched for:
+  then the reason says it is not synced.
 
 ## API-only mode (`--api`)
 
@@ -150,8 +165,9 @@ gh-dash config. It:
 **It cannot save or sync local work**: uncommitted changes, unpushed commits, stashes
 and local branches are not seen at all. Run plain `syncghrepo` for that.
 `--api` works with `--json` (same schema, `mode` is `api`, every repo's `clones`
-is empty) and `--dry-run`. Exit status: 2 for an error or a failed fork sync, 1 for
-failing CI, else 0.
+is empty) and `--dry-run`. Exit status: 2 for an error, a failed GitHub query or a
+failed fork sync, 1 for failing CI, else 0. Your forks are synced even when their
+status query failed (the repo listing says they are forks).
 
 **Review UI.** Every run writes or refreshes a
 [gh-dash](https://github.com/dlvhdr/gh-dash) config with sections for your open
@@ -187,7 +203,8 @@ SYNCGHREPO_ROOTS=~/code/GitHub/proj syncghrepo   # one clone (colon-separated li
 Environment: `SYNCGHREPO_ROOTS` (folders of clones, colon-separated, instead of
 ghq + `~/code`); `SYNCGHREPO_GIT_SYNC` (the git-sync to run). Fixed settings: roots
 are searched 3 levels deep, a branch is stale after 30 days without commits, each
-command times out after 120 s, and 8 clones are processed in parallel.
+command times out after 120 s, and 8 clones are processed in parallel (clones of
+the same repo one after another, so they never pick the same `wip/` name).
 
 From a checkout: `uv run syncghrepo`. In a Makefile:
 
@@ -207,7 +224,9 @@ but not a guarantee.
 something needs attention: uncommitted work, a conflict, a held-back file, a clone
 mid-merge/rebase or detached (a clean submodule is fine), a repo of yours whose clone
 folder is taken, or failing CI on a default branch; 2 for an error (a
-step failed, `gh` or git-sync unusable, bad arguments).
+step failed, `gh` or git-sync unusable, a GitHub status query that failed, bad
+arguments). A repo that GitHub cannot resolve for you (deleted, renamed or no longer
+visible) is only reported, as a `github_error` item.
 
 The JSON report is documented below.
 
@@ -267,14 +286,16 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 
 | kind | key in `id` | what it means |
 | --- | --- | --- |
-| `pr` | `owner/name#N` | open pull request (all PRs in your repos; only yours and review requests elsewhere) |
-| `issue` | `owner/name#N` | open issue assigned to you |
+| `pr` | `owner/name#N` | open pull request (in your repos the 50 most recently updated, plus yours and review requests; only yours and review requests elsewhere) |
+| `prs_not_listed` | `owner/name` | open PRs that belong in the `pr` items but that GitHub did not return (a repo of yours with more than 50 open PRs; elsewhere, more than 50 of yours or review requests); `title` says how many, `url` is the repo's PR list |
+| `issue` | `owner/name#N` | open issue assigned to you (all of them) |
 | `ci_failing` | `owner/name@branch` | CI failing or erroring on the default branch |
-| `github_error` | `owner/name` | the repo could not be queried |
+| `github_error` | `owner/name` | the repo could not be queried (exit 2, unless GitHub cannot resolve the repo for you) |
 | `conflict` | `path:branch` | pull aborted on conflicts that need a person; `detail` lists files and the backup ref |
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
-| `held_back` | `path:file` | secret-looking or oversized file; the whole clone was skipped |
+| `held_back` | `path:file` | secret-looking or oversized file, untracked nested repo or moved submodule; the whole clone was skipped |
+| `save_skipped` | `path:branch` | over 2,000 changed files (a missing `.gitignore`?); the whole clone was skipped; `detail` says how many |
 | `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, or a branch git-sync cannot handle |
 | `unpushed_branch` | `path:branch` | another local branch with commits on no remote |
 | `gone_branch` | `path:branch` | local branch whose upstream was deleted (merged?) |
@@ -307,7 +328,12 @@ succeeded), `new_clones` (cloned, or would be with `--dry-run`), `clones_skipped
 - `remote` (object or null, from GitHub): `name`, `url`, `fork`, `archived`,
   `parent` (`owner/name` or null), `can_push`, `default_branch`, `ci` (`success`,
   `failure`, `error`, `pending`, `expected` or null), `ci_commit`, `open_prs` (total),
-  `assigned_issues_total`, `prs` and `assigned_issues` (first 50 each),
+  `assigned_issues_total`, `assigned_issues` (all of them: past the first 50, the
+  rest are paged in), `prs` (the 50 most recently updated; when a repo has more open
+  PRs, yours and those requesting your review are added from a GitHub search, up to
+  50 of each), `prs_not_listed` (int: open PRs that belong in `prs` but are not in
+  it, in your repos any beyond those, elsewhere yours and review requests past the
+  search's 50; a `prs_not_listed` item when not 0),
   `stale_branches` (`--api` only, else null): each `name`, `age_days`,
   `committed_at` (ISO 8601), `url`.
   - each PR: `number`, `title`, `url`, `author`, `mine`, `draft`,

@@ -3,7 +3,8 @@
 git-sync (simonthum/git-sync) does the actual auto-commit, fetch, fast-forward or
 rebase, and push; syncghrepo does not reimplement it. Around it, syncghrepo:
 
-- skips the clone if any changed file looks like a secret or is huge;
+- skips the clone if any changed file looks like a secret or is huge, or one in
+  the commits a new remote branch would publish for the first time;
 - never runs git-sync on the default branch: work found there moves to a new
   wip/<YYYYMMDD>-<host> branch, which is pushed and opted in; the default branch
   itself is only ever fast-forwarded;
@@ -66,9 +67,15 @@ def process(
     git_sync: str | None = None,
     stale_days: int = 30,
     now: float | None = None,
+    default_branch: str | None = None,
+    synced: set[Path] | None = None,
 ) -> dict:
     """Process one clone. fetch makes a dry run fetch first (it only updates
-    remote-tracking refs), so its plan reflects what is on the remote now."""
+    remote-tracking refs), so its plan reflects what is on the remote now.
+    default_branch is the repo's default branch on GitHub, if known: it and the
+    clone's origin/HEAD are both protected, and it is the one fast-forwarded.
+    synced is the set of repos synced on their own (every discovered clone), if
+    known: an untracked nested repo outside it is reported as not synced."""
     now = time.time() if now is None else now
     moment = datetime.fromtimestamp(now).astimezone()
     git = Git(runner, path)
@@ -96,7 +103,9 @@ def process(
             changed["any"] = True
 
     def inspect() -> dict:
-        return local.inspect(runner, path, stale_days=stale_days, now=now)
+        return local.inspect(
+            runner, path, stale_days=stale_days, now=now, default_branch=default_branch
+        )
 
     def finish(status: str, note: str = "") -> dict:
         extra = {"status": status, "note": note, "fork": fork, "can_push": can_push}
@@ -146,15 +155,18 @@ def process(
         return finish("skipped", f"no commits yet on {info['branch']}; left alone")
 
     # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
+    submodules = save.changed_submodules(git) or {}
     # If git status fails the check cannot run, so the clone is skipped too.
-    held = save.held_back(git, path)
+    held = save.held_back(git, path, synced, submodules)
     if held is None:
         act(STATUS_CMD, ok=False, note=STATUS_FAILED)
         return finish("error", STATUS_FAILED)
     report["held_back"] = held
     if report["held_back"]:
         files = ", ".join(h["path"] for h in report["held_back"][:5])
-        return finish("held-back", f"secret-looking or oversized files ({files}); clone skipped")
+        return finish(
+            "held-back", f"files that must not be auto-committed ({files}); clone skipped"
+        )
 
     # 2. Forks: bring the fork on GitHub up to date with its parent (never --force).
     if fork and can_push:
@@ -167,16 +179,18 @@ def process(
         info = inspect()
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
-    files = save.changed_paths(git)
-    if files is None:
+    # A submodule with only its own files changed: nothing the parent can commit.
+    listed = save.changed_paths(git)
+    if listed is None:
         act(STATUS_CMD, ok=False, note=STATUS_FAILED)
         return finish("error", STATUS_FAILED)
+    files = [f for f in listed if f not in submodules]
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (
             f"{len(files)} files changed (over {save.MAX_FILES}; missing .gitignore?)"
         )
         return done()
-    protected = local.is_protected(branch, info["default_branch"])
+    protected = local.is_protected(branch, info["default_branch"], local.origin_default(git))
 
     # 4a. The default branch with no uncommitted work: fast-forward only, never git-sync.
     if protected and not files:
@@ -222,13 +236,31 @@ def process(
         )
         return done()
 
-    # git-sync's own read-only check: refuses staged changes, odd file states, ...
-    if remote:
-        check = runner([git_sync, "-s", "-n", "check"], where)
-        act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
-        if not check.ok:
-            report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
+    # A new remote branch (git push -u, or a wip/ branch carrying the default branch's
+    # local commits) publishes commits that are on no remote yet: they get the same
+    # secret check as uncommitted files first.
+    if protected or not upstream:
+        unpushed = save.unpushed_held_back(git)
+        if unpushed is None:
+            act("git rev-list HEAD --not --remotes", ok=False, note="could not list them")
             return done()
+        if unpushed:
+            report["held_back"] = unpushed
+            names = ", ".join(h["path"] for h in unpushed[:5])
+            return finish(
+                "held-back", f"files that must not be published, in unpushed commits ({names})"
+            )
+
+    # git-sync's own read-only check: refuses staged changes, odd file states, ...
+    # It runs before anything is changed, also on a branch with no remote yet (it
+    # would stop at "no configured remote"): origin is the remote it is pushed to.
+    probe = None if remote else gitsync.config_env((f"branch.{branch}.remote", "origin"))
+    command = [git_sync, "-s", "-n", "check"]
+    check = runner(command, where, probe) if probe else runner(command, where)
+    act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
+    if not check.ok:
+        report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
+        return done()
 
     # 5. Work on the default branch moves to a new wip/ branch first.
     if protected:
@@ -238,6 +270,20 @@ def process(
         if switched is not None and not switched.ok:
             return done()
         branch, upstream, behind, pending = target, None, 0, 0
+    elif not upstream and save.WIP_NAME.match(branch):
+        # A wip/ branch left without its remote branch because another clone of the
+        # repo pushed that name first (its push -u is rejected): take a free name.
+        theirs = f"refs/remotes/origin/{branch}"
+        if (
+            git("show-ref", "--quiet", "--verify", theirs).ok
+            and not git("merge-base", "--is-ancestor", theirs, "HEAD").ok
+        ):
+            target = save.wip_branch(git, moment.strftime("%Y%m%d"))
+            renamed = None if dry_run else git("branch", "-m", target)
+            act(f"git branch -m {target}", renamed, f"{branch} is taken on origin", change=True)
+            if renamed is not None and not renamed.ok:
+                return done()
+            branch = target
     if not upstream:  # git-sync needs a same-named remote branch: create it
         pushed = (
             None if dry_run else git("push", "--quiet", "-u", "origin", f"HEAD:refs/heads/{branch}")
@@ -279,11 +325,10 @@ def process(
                 return done()
             report["backup_refs"].append(ref)
 
-    if files:
-        report["saved"] = {"branch": branch, "files": files, "commit": None}
-
     # 8. git-sync.
     if dry_run:
+        if files:
+            report["saved"] = {"branch": branch, "files": files, "commit": None}
         steps = [f"commit {len(files)} file(s)"] if files else []
         if behind:
             steps.append(
@@ -302,9 +347,31 @@ def process(
         act("git-sync", note=note, change=True)
         return done()
 
-    result = runner([git_sync], where)
+    def committed() -> bool:
+        """Whether every file is in a new commit. git-sync can exit 0 when its own
+        commit was refused (a commit hook, signing, no identity): it only checks for
+        unstaged changes afterwards, and the refused files are left staged."""
+        remaining = save.changed_paths(git)
+        moved = git.out("rev-parse", "HEAD") != head_before
+        return remaining is not None and moved and not set(files) & set(remaining)
+
+    head_before = git.out("rev-parse", "HEAD")
+    # git-sync decides whether to commit from git status, which status.showUntrackedFiles=no
+    # would leave without the new files; and it checks the tree is clean after its
+    # commit with git diff, which counts edits inside a submodule (the parent cannot
+    # commit those).
+    settings = [("status.showUntrackedFiles", "normal")]
+    if submodules:
+        settings.append(("diff.ignoreSubmodules", "dirty"))
+    env = gitsync.config_env(*settings)
+    result = runner([git_sync], where, env)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
-    if result.ok:
+    if result.ok and files and not committed():
+        left = sorted(set(files) & set(save.changed_paths(git) or files))
+        shown = ", ".join(left[:5]) + (" ..." if len(left) > 5 else "")
+        note = f"auto-commit did not complete (a commit hook, signing or identity?); {shown}"
+        act("git-sync", ok=False, note=note)
+    elif result.ok:
         act("git-sync", ok=True, note=gitsync.summary(result), change=gitsync.did_something(result))
     elif local.busy(git) == "rebase":
         report["resolved"], report["conflicts"] = resolve.finish_rebase(git, runner, path)
@@ -321,12 +388,13 @@ def process(
                 change=True,
                 note=f"rebase stopped; auto-resolved {len(report['resolved'])} conflict(s)",
             )
-            again = runner([git_sync], where)
+            again = runner([git_sync], where, env)
             report["git_sync"] = {"code": again.code, "log": gitsync.log(again)}
             act("git-sync", ok=again.ok, note=gitsync.summary(again), change=True)
     else:
         act("git-sync", ok=False, note=f"exit {result.code}: {gitsync.summary(result)}")
 
-    if report["saved"] and not set(files) & set(save.changed_paths(git) or []):
-        report["saved"]["commit"] = git.out("rev-parse", "--short", "HEAD")
+    if files and committed():  # saved only once the files are really committed
+        commit = git.out("rev-parse", "--short", "HEAD")
+        report["saved"] = {"branch": branch, "files": files, "commit": commit}
     return done()

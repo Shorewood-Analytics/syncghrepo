@@ -10,7 +10,7 @@ from test_cli import point_origin_at_github, use_home
 from test_github import repo_line, status_payload
 from test_schema import CLONE_RECORD, CLONE_RECORD_STATUS, NESTED
 
-from syncghrepo import cli, nested
+from syncghrepo import cli, nested, save
 from syncghrepo.run import Result
 
 
@@ -203,7 +203,7 @@ def test_untracked_nested_repo_holds_back_its_parent(tmp_path, origin, clone, ca
     repos = {r["name"]: r for r in json.loads(capsys.readouterr().out)["repos"]}
     (top,) = repos["benpshore/proj"]["clones"]
     assert top["status"] == "held-back"
-    assert top["held_back"][0]["reason"].startswith("a nested git repo")
+    assert top["held_back"] == [{"path": "tools/inner/", "reason": save.NESTED_SYNCED}]
     assert git(clone, "rev-parse", "HEAD") == before  # never embedded as a gitlink
     assert git(clone, "branch", "--show-current") == "main"
     assert repos["benpshore/inner"]["clones"][0]["status"] == "up-to-date"
@@ -282,3 +282,88 @@ def test_submodule_update_never_moves_local_work(tmp_path, origin, monkeypatch, 
     assert update["ok"] is None
     assert update["note"] == "not run, it could move local work: libs/subby (on branch work)"
     assert git(subby, "branch", "--show-current") == "work"
+
+
+def parent_clone(report, path):
+    return next(c for r in report["repos"] for c in r["clones"] if c["path"] == str(path.resolve()))
+
+
+def test_files_changed_inside_a_submodule_do_not_hold_back_its_parent(
+    tmp_path, origin, monkeypatch, capsys
+):
+    path = super_clone(tmp_path, origin, monkeypatch)
+    git(path, "submodule", "update", "-q", "--init")
+    git(path, "switch", "-q", "-c", "feat")
+    git(path, "push", "-q", "-u", "origin", "feat")
+    subby = path / "libs" / "subby"
+    (subby / "notes.txt").write_text("scratch\n")  # untracked inside the submodule
+    (subby / "README.md").write_text("edited\n")  # and a tracked file edited there
+    (path / "a.txt").write_text("parent work\n")
+    replies = fake_github({"benpshore/proj": origin.bare})
+
+    for _ in range(2):  # and again: nothing left behind that blocks the next run
+        cli.main(["--json"], runner=FakeRunner(replies))
+        top = parent_clone(json.loads(capsys.readouterr().out), path)
+        assert top["held_back"] == [] and top["status"] != "error", top["actions"]
+    assert git(origin.bare, "rev-parse", "refs/heads/feat") == git(path, "rev-parse", "HEAD")
+    assert git(path, "show", "--name-only", "--format=", "HEAD") == "a.txt"
+    assert git(subby, "status", "--porcelain") == "M README.md\n?? notes.txt"  # untouched
+
+
+def test_a_moved_submodule_holds_back_its_parent_with_its_own_reason(
+    tmp_path, origin, monkeypatch, capsys
+):
+    # git add -A would commit the submodule's new commit as the pointer, which could
+    # undo a pointer update the clone pulled; the parent waits for a person.
+    path = super_clone(tmp_path, origin, monkeypatch)
+    git(path, "submodule", "update", "-q", "--init")
+    subby = path / "libs" / "subby"
+    git(subby, "switch", "-q", "-c", "work")
+    commit(subby, "w.txt", "work\n")
+    (path / "a.txt").write_text("parent work\n")
+    before = git(path, "rev-parse", "HEAD")
+
+    cli.main(["--json"], runner=FakeRunner(fake_github({"benpshore/proj": origin.bare})))
+
+    top = parent_clone(json.loads(capsys.readouterr().out), path)
+    assert top["status"] == "held-back"
+    assert top["held_back"] == [{"path": "libs/subby", "reason": save.SUBMODULE_MOVED}]
+    assert "secret-looking" not in top["note"]
+    assert git(path, "rev-parse", "HEAD") == before
+
+
+def test_an_untracked_nested_repo_that_is_not_synced_is_not_called_synced(
+    tmp_path, origin, clone, capsys
+):
+    point_origin_at_github(clone)
+    inner = clone / "vendor" / "inner"  # vendor/ is not searched for nested repos
+    inner.mkdir(parents=True)
+    git(inner, "init", "-q", "-b", "main")
+    commit(inner, "x.txt", "x\n")
+    (inner / "unsaved.txt").write_text("unsaved\n")
+
+    cli.main(["--json"], runner=FakeRunner(fake_github({"benpshore/proj": origin.bare})))
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["nested"] == []  # not discovered, so not synced
+    top = parent_clone(report, clone)
+    assert top["held_back"] == [{"path": "vendor/inner/", "reason": save.NESTED_UNSYNCED}]
+
+
+def test_two_nested_clones_of_one_repo_are_both_processed(tmp_path, origin, clone, capsys):
+    point_origin_at_github(clone)
+    inner_bare, first = nested_clone(tmp_path, clone, "tools/a", "inner")
+    second = clone / "tools" / "b"
+    git(tmp_path, "clone", "-q", str(inner_bare), str(second))
+    point_origin_at_github(second, "benpshore/inner")
+    with (clone / ".git" / "info" / "exclude").open("a") as exclude:
+        exclude.write("/tools/b/\n")
+    replies = fake_github({"benpshore/proj": origin.bare, "benpshore/inner": inner_bare})
+
+    cli.main(["--dry-run", "--json"], runner=FakeRunner(replies))
+
+    report = json.loads(capsys.readouterr().out)
+    paths = [str(first.resolve()), str(second.resolve())]
+    assert [entry["path"] for entry in report["nested"]] == paths
+    inner = {r["name"]: r for r in report["repos"]}["benpshore/inner"]
+    assert sorted(c["path"] for c in inner["clones"]) == paths

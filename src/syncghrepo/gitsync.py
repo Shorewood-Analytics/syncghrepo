@@ -32,6 +32,21 @@ def find(explicit: str | None = None) -> str | None:
     return None
 
 
+def config_env(*pairs: tuple[str, str]) -> dict[str, str]:
+    """Environment that gives git-sync's own git commands extra config (git's
+    GIT_CONFIG_COUNT/KEY/VALUE), after any such entries already set. Nothing is
+    written to the clone's config."""
+    try:
+        start = int(os.environ.get("GIT_CONFIG_COUNT") or 0)
+    except ValueError:
+        start = 0
+    env = {"GIT_CONFIG_COUNT": str(start + len(pairs))}
+    for index, (key, value) in enumerate(pairs, start):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    return env
+
+
 def summary(result: Result) -> str:
     """git-sync's last own message ("In sync, all fine.", "Rebasing failed, ...")."""
     lines = [line[10:] for line in result.out.splitlines() if line.startswith("git-sync: ")]
