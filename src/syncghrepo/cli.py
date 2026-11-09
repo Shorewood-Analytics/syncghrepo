@@ -590,6 +590,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             git_sync=git_sync,
             stale_days=STALE_DAYS,
             now=now,
+            default_branch=repos[key]["default_branch"],
         )
         result["nested_in"] = str(info["parent"]) if info else None
         result["submodule"] = bool(info and info["submodule"])

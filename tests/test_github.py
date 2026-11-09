@@ -8,14 +8,14 @@ from syncghrepo import github
 from syncghrepo.run import Result
 
 
-def repo_line(name, *, fork=False, archived=False, owner_type="User"):
+def repo_line(name, *, fork=False, archived=False, owner_type="User", default="main"):
     return json.dumps(
         {
             "name": name,
             "url": f"https://github.com/{name}",
             "fork": fork,
             "archived": archived,
-            "default_branch": "main",
+            "default_branch": default,
             "owner": name.split("/")[0],
             "owner_type": owner_type,
         }
@@ -31,6 +31,7 @@ def status_payload(
     fork=False,
     permission="ADMIN",
     archived=False,
+    default="main",
 ):
     return json.dumps(
         {
@@ -43,7 +44,7 @@ def status_payload(
                     "viewerPermission": permission,
                     "parent": {"nameWithOwner": "up/proj"} if fork else None,
                     "defaultBranchRef": {
-                        "name": "main",
+                        "name": default,
                         "target": {"oid": "abcdef1234567", "statusCheckRollup": {"state": ci}},
                     },
                     "pullRequests": {"totalCount": len(prs), "nodes": list(prs)},

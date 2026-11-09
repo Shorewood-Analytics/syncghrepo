@@ -64,9 +64,12 @@ def process(
     git_sync: str | None = None,
     stale_days: int = 30,
     now: float | None = None,
+    default_branch: str | None = None,
 ) -> dict:
     """Process one clone. fetch makes a dry run fetch first (it only updates
-    remote-tracking refs), so its plan reflects what is on the remote now."""
+    remote-tracking refs), so its plan reflects what is on the remote now.
+    default_branch is the repo's default branch on GitHub, if known: it and the
+    clone's origin/HEAD are both protected, and it is the one fast-forwarded."""
     now = time.time() if now is None else now
     moment = datetime.fromtimestamp(now).astimezone()
     git = Git(runner, path)
@@ -94,7 +97,9 @@ def process(
             changed["any"] = True
 
     def inspect() -> dict:
-        return local.inspect(runner, path, stale_days=stale_days, now=now)
+        return local.inspect(
+            runner, path, stale_days=stale_days, now=now, default_branch=default_branch
+        )
 
     def finish(status: str, note: str = "") -> dict:
         extra = {"status": status, "note": note, "fork": fork, "can_push": can_push}
@@ -166,7 +171,7 @@ def process(
             f"{len(files)} files changed (over {save.MAX_FILES}; missing .gitignore?)"
         )
         return done()
-    protected = local.is_protected(branch, info["default_branch"])
+    protected = local.is_protected(branch, info["default_branch"], local.origin_default(git))
 
     # 4a. The default branch with no uncommitted work: fast-forward only, never git-sync.
     if protected and not files:

@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 
 import pytest
-from conftest import FakeRunner, git, remote_head
+from conftest import FakeRunner, commit, git, remote_head
 from test_github import pr, repo_line, status_payload
 
 from syncghrepo import cli, dash, local, save
@@ -11,14 +11,16 @@ from syncghrepo.run import Result
 WIP = f"wip/{datetime.now().astimezone().strftime('%Y%m%d')}-{save.host_tag()}"
 
 
-def gh_replies(**permissions):
-    """A fake GitHub where Ben owns proj (cloned locally) and other (not cloned)."""
+def gh_replies(default="main", **permissions):
+    """A fake GitHub where Ben owns proj (cloned locally; default branch `default`) and
+    other (not cloned)."""
     status = {
         "benpshore/proj": status_payload(
             "benpshore/proj",
             ci="FAILURE",
             prs=[pr(7, "dependabot")],
             permission=permissions.get("proj", "ADMIN"),
+            default=default,
         ),
         "benpshore/other": status_payload("benpshore/other"),
     }
@@ -31,7 +33,11 @@ def gh_replies(**permissions):
     return {
         ("api", "user"): Result(0, "benpshore\n"),
         ("api", "--paginate"): Result(
-            0, repo_line("benpshore/proj") + "\n" + repo_line("benpshore/other") + "\n"
+            0,
+            repo_line("benpshore/proj", default=default)
+            + "\n"
+            + repo_line("benpshore/other")
+            + "\n",
         ),
         ("search", "prs"): Result(0, ""),
         ("api", "graphql"): graphql,
@@ -279,3 +285,60 @@ def test_env_roots(monkeypatch):
     assert cli.env_roots() == ["/a", "/b"]
     monkeypatch.delenv("SYNCGHREPO_ROOTS")
     assert cli.env_roots() == []
+
+
+def proj_clone(report: dict) -> dict:
+    (only,) = {r["name"]: r for r in report["repos"]}["benpshore/proj"]["clones"]
+    return only
+
+
+def make_github_default(origin, clone, name):
+    """GitHub's default branch becomes `name` (a new branch); the clone checks it out."""
+    git(origin.seed, "switch", "-q", "-c", name)
+    git(origin.seed, "push", "-q", "origin", name)
+    git(origin.bare, "symbolic-ref", "HEAD", f"refs/heads/{name}")
+    git(clone, "fetch", "-q")
+    git(clone, "switch", "-q", name)
+
+
+@pytest.mark.parametrize("origin_head", ["missing", "stale"])
+def test_work_on_the_github_default_branch_never_goes_to_it(origin, clone, capsys, origin_head):
+    # The local origin/HEAD is not the only source of the default branch: a clone made
+    # with git init + remote add + push has none, and it goes stale (still origin/main
+    # here) when the default branch is changed on GitHub.
+    make_github_default(origin, clone, "develop")
+    if origin_head == "missing":
+        git(clone, "remote", "set-head", "origin", "-d")
+    point_origin_at_github(clone)
+    before = remote_head(origin, "develop")
+    (clone / "a.txt").write_text("half-finished\n")
+
+    cli.main(["--json"], runner=FakeRunner(gh_replies(default="develop")))
+
+    result = proj_clone(json.loads(capsys.readouterr().out))
+    assert remote_head(origin, "develop") == before  # nothing committed or pushed to it
+    assert result["status"] == "updated" and result["branch"] == WIP
+    assert remote_head(origin, WIP) == git(clone, "rev-parse", "HEAD")
+    assert result["default_branch"] == "develop"
+    assert "branch.develop.sync" not in git(clone, "config", "--list")
+
+
+def test_default_branch_without_origin_head_is_fast_forwarded_not_stale(origin, clone, capsys):
+    old = "2020-01-01T00:00:00"
+    commit(clone, "o.txt", "old\n", GIT_COMMITTER_DATE=old, GIT_AUTHOR_DATE=old)
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "switch", "-q", "-c", "feat")
+    git(clone, "push", "-q", "-u", "origin", "feat")
+    git(clone, "remote", "set-head", "origin", "-d")
+    point_origin_at_github(clone)
+
+    cli.main(["--json"], runner=FakeRunner(gh_replies()))
+    report = json.loads(capsys.readouterr().out)
+    assert not [i for i in report["items"] if i["kind"] == "stale_branch"]  # main is old
+    assert report["summary"]["stale_branches"] == 0
+
+    new_main = origin.advance()
+    cli.main(["--json"], runner=FakeRunner(gh_replies()))
+    result = proj_clone(json.loads(capsys.readouterr().out))
+    assert git(clone, "rev-parse", "main") == new_main
+    assert "git fetch . origin/main:main" in [a["cmd"] for a in result["actions"]]
