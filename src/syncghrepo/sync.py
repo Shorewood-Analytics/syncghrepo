@@ -274,11 +274,10 @@ def process(
                 return done()
             report["backup_refs"].append(ref)
 
-    if files:
-        report["saved"] = {"branch": branch, "files": files, "commit": None}
-
     # 8. git-sync.
     if dry_run:
+        if files:
+            report["saved"] = {"branch": branch, "files": files, "commit": None}
         steps = [f"commit {len(files)} file(s)"] if files else []
         if behind:
             steps.append(
@@ -297,9 +296,23 @@ def process(
         act("git-sync", note=note, change=True)
         return done()
 
+    def committed() -> bool:
+        """Whether every file is in a new commit. git-sync can exit 0 when its own
+        commit was refused (a commit hook, signing, no identity): it only checks for
+        unstaged changes afterwards, and the refused files are left staged."""
+        remaining = save.changed_paths(git)
+        moved = git.out("rev-parse", "HEAD") != head_before
+        return remaining is not None and moved and not set(files) & set(remaining)
+
+    head_before = git.out("rev-parse", "HEAD")
     result = runner([git_sync], where)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
-    if result.ok:
+    if result.ok and files and not committed():
+        left = sorted(set(files) & set(save.changed_paths(git) or files))
+        shown = ", ".join(left[:5]) + (" ..." if len(left) > 5 else "")
+        note = f"auto-commit did not complete (a commit hook, signing or identity?); {shown}"
+        act("git-sync", ok=False, note=note)
+    elif result.ok:
         act("git-sync", ok=True, note=gitsync.summary(result), change=gitsync.did_something(result))
     elif local.busy(git) == "rebase":
         report["resolved"], report["conflicts"] = resolve.finish_rebase(git, runner, path)
@@ -322,6 +335,7 @@ def process(
     else:
         act("git-sync", ok=False, note=f"exit {result.code}: {gitsync.summary(result)}")
 
-    if report["saved"] and not set(files) & set(save.changed_paths(git) or []):
-        report["saved"]["commit"] = git.out("rev-parse", "--short", "HEAD")
+    if files and committed():  # saved only once the files are really committed
+        commit = git.out("rev-parse", "--short", "HEAD")
+        report["saved"] = {"branch": branch, "files": files, "commit": commit}
     return done()

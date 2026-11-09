@@ -342,3 +342,26 @@ def test_default_branch_without_origin_head_is_fast_forwarded_not_stale(origin, 
     result = proj_clone(json.loads(capsys.readouterr().out))
     assert git(clone, "rev-parse", "main") == new_main
     assert "git fetch . origin/main:main" in [a["cmd"] for a in result["actions"]]
+
+
+def test_a_rejected_auto_commit_is_an_error_not_saved(origin, clone, capsys):
+    git(clone, "switch", "-q", "-c", "feat")
+    git(clone, "push", "-q", "-u", "origin", "feat")
+    point_origin_at_github(clone)
+    hook = clone / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'lint failed' >&2\nexit 1\n")
+    hook.chmod(0o755)
+    before = git(clone, "rev-parse", "HEAD")
+    (clone / "a.txt").write_text("my work\n")
+
+    code = cli.main(["--json"], runner=FakeRunner(gh_replies()))
+
+    report = json.loads(capsys.readouterr().out)
+    result = proj_clone(report)
+    # git-sync exits 0 ("In sync, all fine.") although its commit was rejected.
+    assert result["status"] == "error", result["actions"]
+    assert "auto-commit did not complete" in result["note"]
+    assert result["saved"] is None and report["summary"]["saved_files"] == 0
+    assert any(i["kind"] == "error" for i in report["items"])
+    assert code == 2
+    assert git(clone, "rev-parse", "HEAD") == before == remote_head(origin, "feat")
