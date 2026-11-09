@@ -167,8 +167,8 @@ def attention(entry: dict) -> list[str]:
             ]
             by = "" if pr["mine"] else f" by {pr['author']}"
             items.append(f"PR #{pr['number']}{by} [{', '.join(tags) or 'open'}]: {pr['title']}")
-        if remote["open_prs"] > len(remote["prs"]) and involved(entry):
-            items.append(f"{remote['open_prs'] - len(remote['prs'])} more open PR(s) not listed")
+        if remote["prs_not_listed"]:
+            items.append(f"{remote['prs_not_listed']} more open PR(s) not listed")
         for issue in remote["assigned_issues"]:
             items.append(f"issue #{issue['number']} assigned to me: {issue['title']}")
         if involved(entry):
@@ -246,6 +246,17 @@ def work_items(repos: list[dict]) -> list[dict]:
                         detail=f"by {pr['author']}",
                     )
                 )
+            if remote["prs_not_listed"]:  # GitHub returned only the first 50
+                items.append(
+                    item(
+                        "prs_not_listed",
+                        name,
+                        repo,
+                        f"{remote['prs_not_listed']} more open PR(s) not listed",
+                        url=f"{remote['url']}/pulls",
+                        detail=f"{remote['open_prs']} open, {len(remote['prs'])} listed",
+                    )
+                )
             for issue in remote["assigned_issues"]:
                 items.append(
                     item(
@@ -301,6 +312,17 @@ def work_items(repos: list[dict]) -> list[dict]:
                         repo,
                         f"{clone['status']} in {local.short_path(path)}",
                         detail=detail,
+                        **at,
+                    )
+                )
+            if clone["save_skipped"]:  # too many changed files: the clone was skipped
+                items.append(
+                    item(
+                        "save_skipped",
+                        f"{path}:{current}",
+                        repo,
+                        f"nothing saved in {local.short_path(path)}",
+                        detail=clone["save_skipped"],
                         **at,
                     )
                 )
@@ -578,6 +600,10 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
         present = {key for _, key in clone_keys} | {key for _, key in found["nested_keys"]}
         records = cloner.plan(runner, repos, me, present, cloner.clone_dir())
 
+    # Repos synced on their own: every clone and nested repo found. An untracked
+    # nested repo outside this set (hidden or build folder, too deep) is not.
+    synced = {path for path, _ in clone_keys} | {i["path"] for i, _ in found["nested_keys"]}
+
     def run_clone(path: Path, key: str, info: dict | None = None) -> dict:
         remote = repos[key]["remote"] or {}
         can_push = bool(remote.get("can_push")) and not repos[key]["archived"]
@@ -590,6 +616,8 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             git_sync=git_sync,
             stale_days=STALE_DAYS,
             now=now,
+            default_branch=repos[key]["default_branch"],
+            synced=synced,
         )
         result["nested_in"] = str(info["parent"]) if info else None
         result["submodule"] = bool(info and info["submodule"])
@@ -599,6 +627,9 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             nested.update(runner, result, dry_run=not apply)
         return result
 
+    def run_in_turn(todo: list[tuple[Path, dict | None]], key: str) -> list[dict]:
+        return [run_clone(path, key, info) for path, info in todo]
+
     nested_report: list[dict] = []
     with ThreadPoolExecutor(max_workers=JOBS) as pool:
         if apply:
@@ -607,6 +638,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
                 job.result()
                 if record["status"] == "cloned":
                     clone_keys.append((Path(record["path"]).resolve(), record["name"].lower()))
+                    synced.add(clone_keys[-1][0])
                 elif record["status"] == "failed":
                     errors.append(f"gh repo clone {record['name']} failed: {record['note']}")
 
@@ -620,13 +652,15 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             for path, _ in clone_keys
         }
         for level in sorted(set(levels.values())):
-            jobs = [
-                (key, pool.submit(run_clone, path, key))
-                for path, key in clone_keys
-                if levels[path] == level
-            ]
+            # Clones of the same repo run one after another: they share its remote,
+            # so each sees the wip/ branch the one before pushed.
+            groups: dict[str, list] = {}
+            for path, key in clone_keys:
+                if levels[path] == level:
+                    groups.setdefault(key, []).append((path, None))
+            jobs = [(key, pool.submit(run_in_turn, todo, key)) for key, todo in groups.items()]
             for key, job in jobs:
-                repos[key]["clones"].append(job.result())
+                repos[key]["clones"].extend(job.result())
 
         # Nested repos, after their parents (whose submodule update may add some),
         # level by level so a repo and one inside it are never processed at once.
@@ -636,6 +670,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
                 (info, register(runner, repos, info["path"]))
                 for info in local.nested_repos(runner, top)
             ]
+            synced.update(info["path"] for info, _ in nested_keys)
         else:
             nested_keys = found["nested_keys"]
         new = [key for _, key in nested_keys if "clones" not in repos[key]]
@@ -644,23 +679,25 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
         fetch_status(pool, runner, repos, new, me)
         infos = [info for info, _ in nested_keys]
         for level in sorted({local.nesting_level(i["path"], infos) for i in infos}):
+            groups = {}
+            for info, key in nested_keys:
+                if local.nesting_level(info["path"], infos) == level:
+                    groups.setdefault(key, []).append((info["path"], info))
             batch = [
-                (info, key, pool.submit(run_clone, info["path"], key, info))
-                for info, key in nested_keys
-                if local.nesting_level(info["path"], infos) == level
+                (key, todo, pool.submit(run_in_turn, todo, key)) for key, todo in groups.items()
             ]
-            for info, key, job in batch:
-                result = job.result()
-                repos[key]["clones"].append(result)
-                nested_report.append(
-                    {
-                        "path": str(info["path"]),
-                        "parent": str(info["parent"]),
-                        "repo": repos[key]["name"],
-                        "submodule": info["submodule"],
-                        "status": result["status"],
-                    }
-                )
+            for key, todo, job in batch:
+                for (_, info), result in zip(todo, job.result(), strict=True):
+                    repos[key]["clones"].append(result)
+                    nested_report.append(
+                        {
+                            "path": str(info["path"]),
+                            "parent": str(info["parent"]),
+                            "repo": repos[key]["name"],
+                            "submodule": info["submodule"],
+                            "status": result["status"],
+                        }
+                    )
 
     ordered, items, summary, generated_at = finish_report(repos, now, records)
     summary["new_clones"] = sum(r["status"] in ("cloned", "would-clone") for r in records)
@@ -714,11 +751,13 @@ def build_api_report(args: argparse.Namespace, runner: Runner, now: float) -> di
         fetch_status(pool, runner, repos, plain, me)
         fetch_status(pool, runner, repos, mine, me, branches=True, stale_days=STALE_DAYS, now=now)
     for entry in repos.values():
-        remote = entry["remote"] or {}
+        # fork and archived come from the status query, else from the repo listing
+        # (when the query failed); a repo of yours can always be pushed to.
+        remote = entry["remote"]
         owner = entry["name"].partition("/")[0]
-        if not (remote.get("fork") and remote.get("can_push") and not remote.get("archived")):
-            continue
         if not me or owner.lower() != me.lower():
+            continue
+        if not (entry["fork"] and not entry["archived"] and (remote or {}).get("can_push", True)):
             continue
         cmd = f"gh repo sync {entry['name']}"
         if apply:
@@ -888,6 +927,11 @@ def exit_code(report: dict) -> int:
     """0 all fine, 1 needs attention, 2 an error."""
     clones = [clone for entry in report["repos"] for clone in entry["clones"]]
     if report["errors"] or any(c["status"] == "error" for c in clones):
+        return 2
+    # A GitHub query that failed (rate limit, network, auth): push access, forks and CI
+    # are unknown. A repo GitHub cannot find for you is only reported (github_error).
+    errors = [entry.get("remote_error") for entry in report["repos"]]
+    if any(error and not github.not_found(error) for error in errors):
         return 2
     if any((entry.get("fork_sync") or {}).get("ok") is False for entry in report["repos"]):
         return 2

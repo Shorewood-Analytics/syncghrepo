@@ -25,7 +25,7 @@ ALLOWED = (
     ("git",),  # includes git submodule (status, update --init --recursive)
     ("git", "submodule"),  # listed on its own so the allowlist documents it
     ("git-sync",),  # simonthum/git-sync: auto-commit, rebase, push (plain bash + git)
-    ("gh", "api"),  # user, user/repos and the fixed GraphQL query in github.py
+    ("gh", "api"),  # user, user/repos and the fixed GraphQL queries in github.py
     ("gh", "search", "prs"),
     ("gh", "repo", "sync"),
     ("gh", "repo", "clone"),  # only repos of yours with no clone anywhere under the roots

@@ -5,8 +5,17 @@ import os
 
 from conftest import FakeRunner, git
 from test_cli import point_origin_at_github
-from test_github import branch_lines, pr, ref, repo_line, status_payload
-from test_schema import FORK_SYNC, REMOTE_BRANCH
+from test_github import (
+    assigned_beyond_50,
+    branch_lines,
+    busy_upstream,
+    issue,
+    pr,
+    ref,
+    repo_line,
+    status_payload,
+)
+from test_schema import FORK_SYNC, ITEM, KINDS, REMOTE_BRANCH
 
 from syncghrepo import cli, dash
 from syncghrepo.run import Result
@@ -106,3 +115,83 @@ def test_api_fork_sync_failure_exits_2(tmp_path, capsys):
     (item,) = [i for i in report["items"] if i["kind"] == "fork_sync_failed"]
     assert item["id"] == "fork_sync_failed:benpshore/fork"
     assert "diverging" in item["detail"]
+
+
+RATE_LIMITED = Result(1, "", "gh: API rate limit exceeded for user ID 1. (HTTP 403)")
+
+
+def test_api_failed_github_queries_exit_2_and_forks_are_still_synced(capsys):
+    github = api_github()
+    github[("api", "graphql")] = RATE_LIMITED
+    runner = FakeRunner(github)
+
+    code = cli.main(["--api", "--json"], runner=runner)
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 2  # not "all fine": nothing could be queried
+    kinds = {i["id"]: i["kind"] for i in report["items"]}
+    assert set(kinds.values()) == {"github_error"} and len(kinds) == 3
+    # benpshore/fork is yours and a fork per the repo listing: synced all the same.
+    assert [c for c in runner.calls if c[1:3] == ["repo", "sync"]] == [
+        ["gh", "repo", "sync", "benpshore/fork"]
+    ]
+    repos = {r["name"]: r for r in report["repos"]}
+    assert repos["benpshore/fork"]["fork_sync"]["ok"] is True
+    assert repos["benpshore/proj"]["fork_sync"] is None
+
+
+def test_api_repo_github_cannot_resolve_is_an_item_not_an_error(capsys):
+    github = api_github()
+    answer = github[("api", "graphql")]
+    gone = "gh: Could not resolve to a Repository with the name 'friend/shared'. (repository)"
+
+    def graphql(cmd):
+        return Result(1, "", gone) if "name=shared" in cmd else answer(cmd)
+
+    github[("api", "graphql")] = graphql
+    assert cli.main(["--api", "--json"], runner=FakeRunner(github)) == 0
+    report = json.loads(capsys.readouterr().out)
+    (item,) = [i for i in report["items"] if i["kind"] == "github_error"]
+    assert item["id"] == "github_error:friend/shared" and "Could not resolve" in item["detail"]
+
+
+def test_api_lists_my_pr_in_a_busy_repo_i_contributed_to(capsys):
+    # gh search prs found a PR of mine in up/big, older than its 50 latest open PRs.
+    github = {
+        ("api", "user"): Result(0, "benpshore\n"),
+        ("api", "--paginate"): Result(0, ""),
+        ("search", "prs"): Result(0, "up/big\n"),
+        ("api", "graphql"): busy_upstream(([pr(7)], [])),
+    }
+    cli.main(["--api", "--json"], runner=FakeRunner(github))
+    report = json.loads(capsys.readouterr().out)
+    assert [i["id"] for i in report["items"]] == ["pr:up/big#7"]
+    assert report["summary"]["open_prs"] == 1
+
+
+def test_api_items_cover_prs_and_issues_beyond_the_first_50(capsys):
+    # A repo of mine with 300 open PRs and 80 issues assigned to me: GitHub returns
+    # 50 of each in the status query.
+    github = {
+        ("api", "user"): Result(0, "benpshore\n"),
+        ("api", "--paginate"): Result(0, repo_line("benpshore/proj") + "\n"),
+        ("search", "prs"): Result(0, ""),
+        ("api", "graphql"): assigned_beyond_50([issue(n) for n in range(1, 81)]),
+    }
+
+    code = cli.main(["--api", "--json"], runner=FakeRunner(github))
+
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0  # open PRs and issues are work, not a failure
+    kinds = [i["kind"] for i in report["items"]]
+    assert {k: kinds.count(k) for k in set(kinds)} == {"pr": 50, "issue": 80, "prs_not_listed": 1}
+    assert report["summary"]["assigned_issues"] == 80
+    (more,) = [i for i in report["items"] if i["kind"] == "prs_not_listed"]
+    assert set(more) == ITEM and more["kind"] in KINDS
+    assert more["id"] == "prs_not_listed:benpshore/proj"
+    assert more["title"] == "250 more open PR(s) not listed"
+    assert more["url"] == "https://github.com/benpshore/proj/pulls"
+    assert more["detail"] == "300 open, 50 listed"
+    (repo,) = report["repos"]
+    assert repo["remote"]["prs_not_listed"] == 250
+    assert "250 more open PR(s) not listed" in repo["attention"]

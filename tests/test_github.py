@@ -8,14 +8,14 @@ from syncghrepo import github
 from syncghrepo.run import Result
 
 
-def repo_line(name, *, fork=False, archived=False, owner_type="User"):
+def repo_line(name, *, fork=False, archived=False, owner_type="User", default="main"):
     return json.dumps(
         {
             "name": name,
             "url": f"https://github.com/{name}",
             "fork": fork,
             "archived": archived,
-            "default_branch": "main",
+            "default_branch": default,
             "owner": name.split("/")[0],
             "owner_type": owner_type,
         }
@@ -31,6 +31,9 @@ def status_payload(
     fork=False,
     permission="ADMIN",
     archived=False,
+    default="main",
+    total=None,
+    issues_total=None,
 ):
     return json.dumps(
         {
@@ -43,11 +46,17 @@ def status_payload(
                     "viewerPermission": permission,
                     "parent": {"nameWithOwner": "up/proj"} if fork else None,
                     "defaultBranchRef": {
-                        "name": "main",
+                        "name": default,
                         "target": {"oid": "abcdef1234567", "statusCheckRollup": {"state": ci}},
                     },
-                    "pullRequests": {"totalCount": len(prs), "nodes": list(prs)},
-                    "issues": {"totalCount": len(issues), "nodes": list(issues)},
+                    "pullRequests": {
+                        "totalCount": len(prs) if total is None else total,
+                        "nodes": list(prs),
+                    },
+                    "issues": {
+                        "totalCount": len(issues) if issues_total is None else issues_total,
+                        "nodes": list(issues),
+                    },
                 }
             }
         }
@@ -144,6 +153,107 @@ def test_repo_status_for_contributed_repo_keeps_only_my_prs():
     runner = FakeRunner({("api", "graphql"): Result(0, status_payload("up/lib", prs=prs))})
     status = github.repo_status(runner, "up/lib", "benpshore", all_prs=False)
     assert [p["number"] for p in status["prs"]] == [1, 3]
+
+
+def busy_upstream(found_by_search, counts=None):
+    """up/big has 400 open PRs; the status query lists the 50 most recently updated,
+    none of them Ben's. The search query finds found_by_search (mine, requested), of
+    counts (issueCount of each search; by default all of them)."""
+    others = [pr(1000 + n, f"user{n}") for n in range(50)]
+
+    def graphql(cmd):
+        query = next(a for a in cmd if a.startswith("query="))
+        if "search(" in query:
+            mine, requested = found_by_search
+            data = {"mine": {"nodes": mine}, "requested": {"nodes": [*requested, {}]}}
+            for key, count in zip(("mine", "requested"), counts or (), strict=False):
+                data[key]["issueCount"] = count
+            return Result(0, json.dumps({"data": data}))
+        return Result(0, status_payload("up/big", prs=others, total=400))
+
+    return graphql
+
+
+def test_my_prs_and_review_requests_beyond_the_first_50_are_found():
+    found = ([pr(7)], [pr(8, "stranger", requested=["benpshore"]), pr(7)])
+    runner = FakeRunner({("api", "graphql"): busy_upstream(found)})
+
+    contributed = github.repo_status(runner, "up/big", "benpshore", all_prs=False)
+
+    assert [p["number"] for p in contributed["prs"]] == [7, 8]
+    assert contributed["open_prs"] == 400
+    search = runner.calls[1]
+    assert "mine=repo:up/big is:pr is:open author:benpshore" in search
+    assert "requested=repo:up/big is:pr is:open review-requested:benpshore" in search
+    involved = github.repo_status(runner, "up/big", "benpshore")
+    assert len(involved["prs"]) == 52 and {7, 8} <= {p["number"] for p in involved["prs"]}
+
+
+def test_no_search_when_every_open_pr_is_listed():
+    runner = FakeRunner({("api", "graphql"): Result(0, status_payload(prs=[pr(1)]))})
+    status = github.repo_status(runner, "benpshore/proj", "benpshore")
+    assert len(runner.calls) == 1
+    assert status["prs_not_listed"] == 0
+
+
+def test_prs_not_listed_counts_the_open_prs_github_did_not_return():
+    found = ([pr(7)], [pr(8, "stranger", requested=["benpshore"])])
+    runner = FakeRunner({("api", "graphql"): busy_upstream(found, counts=(1, 1))})
+    # Your repo: every open PR belongs in the list; 52 of 400 are in it.
+    assert github.repo_status(runner, "up/big", "benpshore")["prs_not_listed"] == 348
+    # Elsewhere only yours and review requests belong: both searches found all.
+    contributed = github.repo_status(runner, "up/big", "benpshore", all_prs=False)
+    assert contributed["prs_not_listed"] == 0
+    # ... unless you have more open PRs there than one search page returns.
+    capped = FakeRunner({("api", "graphql"): busy_upstream(found, counts=(70, 1))})
+    contributed = github.repo_status(capped, "up/big", "benpshore", all_prs=False)
+    assert contributed["prs_not_listed"] == 69
+
+
+def issue(number):
+    return {"number": number, "title": f"Issue {number}", "url": f"https://x/{number}",
+            "updatedAt": "2026-10-01T00:00:00Z"}  # fmt: skip
+
+
+def assigned_beyond_50(issues):
+    """gh api graphql for benpshore/proj: the status query returns the first 50 of
+    issues; the paged issues query returns all of them, one JSON line each (--jq)."""
+
+    def graphql(cmd):
+        query = next(a for a in cmd if a.startswith("query="))
+        if "--paginate" in cmd and "issues(" in query:
+            assert "me=benpshore" in cmd and "--jq" in cmd
+            return Result(0, "".join(json.dumps(i) + "\n" for i in issues))
+        if "--paginate" in cmd:  # remote branches (--api)
+            return Result(0, "")
+        if "search(" in query:
+            empty = {"issueCount": 0, "nodes": []}
+            return Result(0, json.dumps({"data": {"mine": empty, "requested": empty}}))
+        others = [pr(1000 + n, f"user{n}") for n in range(50)]
+        return Result(0, status_payload(prs=others, total=300, issues=issues[:50],
+                                        issues_total=len(issues)))  # fmt: skip
+
+    return graphql
+
+
+def test_issues_assigned_to_me_beyond_the_first_50_are_all_listed():
+    issues = [issue(n) for n in range(1, 81)]
+    runner = FakeRunner({("api", "graphql"): assigned_beyond_50(issues)})
+
+    status = github.repo_status(runner, "benpshore/proj", "benpshore")
+
+    assert [i["number"] for i in status["assigned_issues"]] == list(range(1, 81))
+    assert status["assigned_issues_total"] == 80
+    assert status["assigned_issues"][-1] == {
+        "number": 80, "title": "Issue 80", "url": "https://x/80",
+        "updated_at": "2026-10-01T00:00:00Z",
+    }  # fmt: skip
+
+
+def test_no_issue_paging_when_every_assigned_issue_is_listed():
+    runner = FakeRunner({("api", "graphql"): Result(0, status_payload(issues=[issue(1)]))})
+    github.repo_status(runner, "benpshore/proj", "benpshore")
+    assert len(runner.calls) == 1
 
 
 def ref(name, date, *, open_prs=0):

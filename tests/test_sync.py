@@ -9,7 +9,7 @@ import pytest
 from conftest import GIT_SYNC, FakeRunner, commit, fake_token, git, remote_head
 
 from syncghrepo import save, sync
-from syncghrepo.run import Result
+from syncghrepo.run import Git, Result
 
 WIP = f"wip/{datetime.now().astimezone().strftime('%Y%m%d')}-{save.host_tag()}"
 # Anything that could lose work or rewrite published history. None of it may ever run.
@@ -112,6 +112,25 @@ def test_second_wip_branch_the_same_day_gets_a_suffix(origin, clone):
     assert result["saved"]["branch"] == f"{WIP}-2"
 
 
+def test_a_wip_branch_whose_name_is_taken_on_origin_is_renamed_then_pushed(origin, clone):
+    # Left by an earlier run: the clone moved to wip/..., but another clone of the
+    # repo had pushed that name first, so its push -u is rejected on every run.
+    git(origin.seed, "switch", "-q", "-c", WIP)
+    theirs = commit(origin.seed, "theirs.txt", "other clone\n")
+    git(origin.seed, "push", "-q", "origin", WIP)
+    git(clone, "fetch", "-q")
+    git(clone, "switch", "-q", "-c", WIP, "main")  # no upstream
+    (clone / "mine.txt").write_text("mine\n")
+
+    result, _ = apply(clone)
+
+    assert result["status"] == "updated", result["actions"]
+    assert result["branch"] == f"{WIP}-2"
+    assert remote_head(origin, f"{WIP}-2") == head(clone)
+    assert remote_head(origin, WIP) == theirs  # never overwritten
+    assert "mine.txt" in git(clone, "show", "--name-only", "--format=", "HEAD").split()
+
+
 def test_main_fast_forwards_while_work_moves_to_wip(origin, clone):
     (clone / "a.txt").write_text("edited\n")
     new = origin.advance()
@@ -169,6 +188,136 @@ def test_secret_hit_skips_the_whole_clone(origin, clone, monkeypatch):
     assert_safe(runner)
 
 
+def test_secret_in_a_never_pushed_commit_is_not_published(origin, clone):
+    # The same check as for uncommitted files, before git push -u publishes the
+    # branch's commits for the first time.
+    git(clone, "switch", "-q", "-c", "try-local")
+    commit(clone, "ok.py", "print('hi')\n")
+    commit(clone, "config.py", "TOKEN = '" + fake_token() + "'\n")
+    git(clone, "rm", "-q", "config.py")  # removed again, but still in a commit
+    git(clone, "commit", "-q", "-m", "remove it")
+    (clone / "more.txt").write_text("more\n")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "held-back", report["actions"]
+        (held,) = report["held_back"]
+        assert held["path"] == "config.py"
+        assert held["reason"].startswith("contains a secret-looking string, in unpushed commit ")
+    assert fake_token() not in str(result)
+    assert remote_head(origin, "try-local") is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+    assert config(clone, "branch.try-local.sync") is None
+
+
+def test_secret_in_a_local_commit_on_main_is_not_carried_to_a_wip_branch(origin, clone):
+    commit(clone, "deploy.pem", "not really a key\n")  # local commit, never pushed
+    (clone / "a.txt").write_text("small edit\n")  # work on main moves to wip/ ...
+
+    result, runner = apply(clone)
+
+    assert result["status"] == "held-back", result["actions"]
+    assert [h["path"] for h in result["held_back"]] == ["deploy.pem"]
+    assert result["held_back"][0]["reason"].startswith("secret-looking file name, in unpushed")
+    assert git(clone, "branch", "--show-current") == "main"
+    assert remote_head(origin, WIP) is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+
+
+def test_unpushed_scan_checks_names_sizes_and_only_unpushed_commits(origin, clone, monkeypatch):
+    monkeypatch.setattr(save, "MAX_FILE_BYTES", 100)
+    commit(clone, "fixture.pem", "already on the remote\n")
+    git(clone, "push", "-q", "origin", "main")
+    git(clone, "switch", "-q", "-c", "x")
+    commit(clone, "notes.txt", "same bytes\n")
+    commit(clone, ".env", "same bytes\n")  # same blob as notes.txt: still a name hit
+    commit(clone, "big.bin", "0" * 200)
+    commit(clone, "fixture.pem", "changed in an unpushed commit\n")
+
+    held = save.unpushed_held_back(Git(FakeRunner(), clone))
+
+    assert {h["path"]: h["reason"].split(",")[0] for h in held} == {
+        ".env": "secret-looking file name",
+        "big.bin": "larger than 0 MB",
+        "fixture.pem": "secret-looking file name",
+    }
+
+
+def test_secret_added_in_a_merge_commit_is_not_published(origin, clone):
+    # A merge commit's own changes (a conflict resolution, an "evil merge") are
+    # published by git push -u like those of any other commit.
+    git(clone, "switch", "-q", "-c", "side")
+    commit(clone, "side.txt", "side work\n")
+    git(clone, "switch", "-q", "-c", "local-only", "main")
+    commit(clone, "ok.py", "print('hi')\n")
+    git(clone, "merge", "-q", "--no-commit", "side")
+    (clone / "config.py").write_text("TOKEN = '" + fake_token() + "'\n")
+    git(clone, "add", "config.py")
+    git(clone, "commit", "-q", "-m", "merge side")
+    (clone / "more.txt").write_text("more\n")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "held-back", report["actions"]
+        (held,) = report["held_back"]
+        assert held["path"] == "config.py"
+        assert held["reason"].startswith("contains a secret-looking string, in unpushed commit ")
+    assert fake_token() not in str(result)
+    assert remote_head(origin, "local-only") is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+
+
+def test_unpushed_scan_sees_merge_resolutions_and_type_changes(origin, clone):
+    (clone / "settings.py").symlink_to("a.txt")
+    git(clone, "add", "settings.py")
+    git(clone, "commit", "-q", "-m", "link")
+    git(clone, "push", "-q", "origin", "main")  # a published symlink: no content
+    git(clone, "switch", "-q", "-c", "side")
+    commit(clone, "c.txt", "side\n")
+    git(clone, "switch", "-q", "-c", "x", "main")
+    (clone / "settings.py").unlink()  # symlink -> regular file: a type change (T)
+    commit(clone, "settings.py", "TOKEN = '" + fake_token() + "'\n")
+    commit(clone, "c.txt", "mine\n")
+    git(clone, "merge", "-q", "--no-commit", "-s", "ours", "side")
+    (clone / "c.txt").write_text("resolved " + fake_token() + "\n")  # in neither parent
+    (clone / ".env").write_text("added by the merge\n")
+    git(clone, "add", "c.txt", ".env")
+    git(clone, "commit", "-q", "-m", "merge side")
+
+    held = save.unpushed_held_back(Git(FakeRunner(), clone))
+
+    assert {h["path"]: h["reason"].split(",")[0] for h in held} == {
+        ".env": "secret-looking file name",
+        "c.txt": "contains a secret-looking string",
+        "settings.py": "contains a secret-looking string",
+    }
+
+
+def test_new_files_are_saved_when_git_status_hides_untracked_files(origin, clone):
+    feature(clone)
+    git(clone, "config", "status.showUntrackedFiles", "no")  # common in big repos
+    (clone / "notes.md").write_text("new notes\n")
+
+    result, _ = apply(clone)
+
+    assert result["status"] == "updated", result["actions"]
+    assert result["saved"]["files"] == ["notes.md"]
+    assert "notes.md" in git(origin.bare, "ls-tree", "--name-only", "feat").split()
+    assert git(clone, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_hidden_untracked_files_are_still_counted(origin, clone):
+    feature(clone)
+    git(clone, "config", "status.showUntrackedFiles", "no")
+    (clone / "notes.md").write_text("new notes\n")
+    result, _ = apply(clone, can_push=False)  # left as is: must still need attention
+    assert result["untracked"] == 1
+
+
 def test_ignored_files_are_never_committed(origin, clone):
     feature(clone)
     (clone / ".gitignore").write_text("*.log\n")
@@ -206,6 +355,34 @@ def test_git_sync_refusal_is_reported_and_nothing_changes(origin, clone):
     assert head(clone) == before
     assert config(clone, "branch.feat.sync") is None
     assert result["git_sync"]["code"] == 1
+
+
+@pytest.mark.parametrize("where", ["local-only branch", "default branch without upstream"])
+def test_git_sync_refusal_without_a_remote_changes_nothing(origin, clone, where):
+    # git-sync's check needs branch.<b>.remote; without one it must still run first,
+    # before the branch is pushed, switched to wip/ or opted in.
+    if where == "local-only branch":
+        git(clone, "switch", "-q", "-c", "feat")
+    else:
+        git(clone, "branch", "--unset-upstream")
+    branch = git(clone, "branch", "--show-current")
+    (clone / "a.txt").write_text("staged\n")
+    git(clone, "add", "a.txt")  # git-sync refuses staged changes
+    (clone / "b.txt").write_text("untracked\n")
+    remote_before = git(origin.bare, "for-each-ref", "--format=%(refname) %(objectname)")
+    config_before = git(clone, "config", "--list", "--local")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "error", report["actions"]
+        assert "handle manually" in report["note"]
+        assert cmds(report)[-1] == "git-sync -s -n check"
+    assert runner.git_sync_calls() == [["-s", "-n", "check"]]
+    assert git(origin.bare, "for-each-ref", "--format=%(refname) %(objectname)") == remote_before
+    assert git(clone, "config", "--list", "--local") == config_before
+    assert git(clone, "branch", "--show-current") == branch
 
 
 def diverge(origin, clone, files_upstream: dict, files_mine: dict):

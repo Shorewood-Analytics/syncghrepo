@@ -32,6 +32,32 @@ query($owner: String!, $name: String!, $me: String!) {
 }
 """
 
+# Your open PRs and PRs requesting your review in one repo, found by GitHub search:
+# asked only when the status query's first 50 open PRs are not all of them.
+SEARCH_QUERY = """
+query($mine: String!, $requested: String!) {
+  mine: search(type: ISSUE, query: $mine, first: 50) { issueCount nodes { ...pr } }
+  requested: search(type: ISSUE, query: $requested, first: 50) { issueCount nodes { ...pr } }
+}
+fragment pr on PullRequest {
+  number title url isDraft updatedAt reviewDecision author { login }
+  reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } }
+}
+"""
+
+# Every open issue assigned to you in one repo, all pages: one JSON line per issue.
+# Asked only when the status query's first 50 are not all of them.
+ISSUES_QUERY = """
+query($owner: String!, $name: String!, $me: String!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(states: OPEN, first: 100, after: $endCursor, filterBy: {assignee: $me}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { number title url updatedAt }
+    }
+  }
+}
+"""
+ISSUES_JQ = ".data.repository.issues.nodes[] | {number, title, url, updatedAt}"
 
 # Every branch on GitHub (--api mode only), all pages: one JSON line per branch.
 BRANCHES_QUERY = """
@@ -59,6 +85,12 @@ PUSH_PERMISSIONS = frozenset({"WRITE", "MAINTAIN", "ADMIN"})
 
 class GhError(RuntimeError):
     pass
+
+
+def not_found(error: str) -> bool:
+    """Whether a status query failed only because GitHub has no such repo for you
+    (deleted, renamed away or no longer visible), not because the query failed."""
+    return "Could not resolve to a Repository" in error or error.endswith(": not found")
 
 
 def gh(runner: Runner, *args: str) -> str:
@@ -158,6 +190,33 @@ def stale_branches(
     return sorted(found, key=lambda branch: branch["name"])
 
 
+def my_open_prs(runner: Runner, name: str, me: str) -> tuple[list[dict], int]:
+    """Open PRs in name that me opened or is asked to review (as PR nodes), and how
+    many more of them the search found but did not return (past its first page)."""
+    scope = f"repo:{name} is:pr is:open"
+    raw = gh(runner, "api", "graphql", "-f", f"query={SEARCH_QUERY}",
+             "-f", f"mine={scope} author:{me}",
+             "-f", f"requested={scope} review-requested:{me}")  # fmt: skip
+    data = json.loads(raw).get("data") or {}
+    nodes: list[dict] = []
+    missed = 0
+    for found in ("mine", "requested"):
+        result = data.get(found) or {}
+        page = result.get("nodes") or []
+        nodes += page
+        missed += max(0, (result.get("issueCount") or 0) - len(page))
+    return nodes, missed
+
+
+def my_issues(runner: Runner, name: str, me: str) -> list[dict]:
+    """Every open issue in name assigned to me (as issue nodes), all pages."""
+    owner, repo = name.split("/", 1)
+    raw = gh(runner, "api", "graphql", "--paginate", "-f", f"query={ISSUES_QUERY}",
+             "-f", f"owner={owner}", "-f", f"name={repo}", "-f", f"me={me}",
+             "--jq", ISSUES_JQ)  # fmt: skip
+    return [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+
 def repo_status(
     runner: Runner,
     name: str,
@@ -195,8 +254,19 @@ def repo_status(
     commit = ref.get("target") or {}
     rollup = commit.get("statusCheckRollup") or {}
 
+    nodes = list(data["pullRequests"]["nodes"])
+    missed = 0  # yours and review requests past the search's first page
+    if data["pullRequests"]["totalCount"] > len(nodes):
+        # Only the 50 most recently updated are listed: yours and your review
+        # requests may be older, so ask GitHub search for those.
+        found, missed = my_open_prs(runner, data["nameWithOwner"], me)
+        nodes += found
     prs = []
-    for node in data["pullRequests"]["nodes"]:
+    seen: set[int] = set()
+    for node in nodes:
+        if not node.get("number") or node["number"] in seen:
+            continue
+        seen.add(node["number"])
         author = (node.get("author") or {}).get("login") or "ghost"
         requested = any(
             ((req.get("requestedReviewer") or {}).get("login") or "").lower() == me.lower()
@@ -222,6 +292,14 @@ def repo_status(
             }
         )
 
+    issues = list(data["issues"]["nodes"])
+    if data["issues"]["totalCount"] > len(issues):  # each is yours: list them all
+        listed = {node["number"] for node in issues}
+        for node in my_issues(runner, data["nameWithOwner"], me):
+            if node["number"] not in listed:
+                listed.add(node["number"])
+                issues.append(node)
+
     return {
         "name": data["nameWithOwner"],
         "url": data["url"],
@@ -234,9 +312,14 @@ def repo_status(
         "ci_commit": (commit.get("oid") or "")[:7] or None,
         "open_prs": data["pullRequests"]["totalCount"],
         "prs": prs,
+        # Open PRs that belong in prs (in your repos all of them, elsewhere yours and
+        # review requests) but that GitHub did not return.
+        "prs_not_listed": max(0, data["pullRequests"]["totalCount"] - len(prs))
+        if all_prs
+        else missed,
         "assigned_issues": [
             {k: node[k] for k in ("number", "title", "url")} | {"updated_at": node["updatedAt"]}
-            for node in data["issues"]["nodes"]
+            for node in issues
         ],
         "assigned_issues_total": data["issues"]["totalCount"],
         "stale_branches": stale_branches(

@@ -203,13 +203,32 @@ def busy(git: Git) -> str | None:
     )
 
 
-def is_protected(branch: str | None, default: str | None) -> bool:
-    """Work is never committed or pushed to the default branch (or main/master)."""
-    return branch is not None and (branch == default or branch in PROTECTED)
+def is_protected(branch: str | None, *defaults: str | None) -> bool:
+    """Work is never committed or pushed to a default branch (or main/master)."""
+    return branch is not None and (branch in defaults or branch in PROTECTED)
 
 
-def inspect(runner: Runner, path: Path, *, stale_days: int = 30, now: float | None = None) -> dict:
-    """Read-only snapshot of a clone. Uses remote-tracking refs as of the last fetch."""
+def origin_default(git: Git) -> str | None:
+    """The default branch as the clone last saw it (origin/HEAD). It can be missing
+    (a clone made with git init + remote add) or stale (the default was changed on
+    GitHub), so GitHub's own answer is preferred where there is one."""
+    ref = git.out("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    return ref.split("/", 1)[1] if ref and "/" in ref else None
+
+
+def inspect(
+    runner: Runner,
+    path: Path,
+    *,
+    stale_days: int = 30,
+    now: float | None = None,
+    default_branch: str | None = None,
+) -> dict:
+    """Read-only snapshot of a clone. Uses remote-tracking refs as of the last fetch.
+
+    default_branch is the repo's default branch on GitHub, if known; it is preferred
+    over origin/HEAD, and neither counts as a stale branch.
+    """
     now = time.time() if now is None else now
     git = Git(runner, path)
 
@@ -221,11 +240,12 @@ def inspect(runner: Runner, path: Path, *, stale_days: int = 30, now: float | No
     )
     # A branch configured to track a remote branch that no longer exists (merged and deleted).
     upstream_gone = bool(branch and not upstream and git.out("config", f"branch.{branch}.merge"))
-    default = git.out("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-    default = default.split("/", 1)[1] if default and "/" in default else None
+    seen = origin_default(git)
+    default = default_branch or seen
 
     changes = untracked = 0
-    for line in (git.out("status", "--porcelain") or "").splitlines():
+    # --untracked-files=normal: status.showUntrackedFiles=no must not hide new files.
+    for line in (git.out("status", "--porcelain", "--untracked-files=normal") or "").splitlines():
         if line.startswith("??"):
             untracked += 1
         elif line.strip():
@@ -251,7 +271,7 @@ def inspect(runner: Runner, path: Path, *, stale_days: int = 30, now: float | No
             "unpushed": int(count) if count and count.isdigit() else 0,
             "age_days": age,
             "gone": track == "gone",
-            "stale": name not in (default, branch) and age >= stale_days,
+            "stale": name not in (default, seen, branch) and age >= stale_days,
         }
         if info["unpushed"] or info["gone"] or info["stale"]:
             branches.append(info)
