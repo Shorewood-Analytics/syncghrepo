@@ -435,7 +435,7 @@ def summarize(repos: list[dict]) -> dict:
 
 
 def origin_name(runner: Runner, path: Path) -> tuple[str | None, str | None]:
-    """(owner/name on GitHub or None, origin URL or None) for a clone."""
+    """(owner/name on GitHub or None, origin URL without credentials or None) for a clone."""
     urls = [
         runner(cmd, str(path))
         for cmd in (
@@ -444,7 +444,7 @@ def origin_name(runner: Runner, path: Path) -> tuple[str | None, str | None]:
         )
     ]
     names = [local.github_name(url.out) for url in urls if url.ok]
-    url = urls[0].out.strip() if urls[0].ok else None
+    url = local.redact_url(urls[0].out.strip()) if urls[0].ok else None
     return next((name for name in names if name), None), url
 
 

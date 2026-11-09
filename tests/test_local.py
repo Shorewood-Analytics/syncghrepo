@@ -91,3 +91,18 @@ def test_inspect_reports_branches_stashes_and_worktrees(tmp_path, origin, clone)
     assert [p.endswith("wt") for p in result["worktrees"]] == [True]
     assert result["default_branch"] == "main"
     assert result["changes"] == 0 and result["upstream_gone"] is False
+
+
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [("https://x-access-token:tok@github.com/o/r.git", "https://github.com/o/r.git"),
+     ("https://tok@github.com/o/r", "https://github.com/o/r"),
+     ("http://u:p%40ss@host:8080/r.git", "http://host:8080/r.git"),
+     ("ssh://git@github.com/o/r.git", "ssh://git@github.com/o/r.git"),
+     ("ssh://ben:pw@host/r.git", "ssh://ben@host/r.git"),
+     ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+     ("/srv/git/r.git", "/srv/git/r.git"), ("file:///srv/r.git", "file:///srv/r.git"),
+     (None, None)],
+)  # fmt: skip
+def test_redact_url_drops_credentials(url, shown):
+    assert local.redact_url(url) == shown

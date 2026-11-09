@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 
 import pytest
-from conftest import FakeRunner, commit, git, remote_head
+from conftest import FakeRunner, commit, fake_token, git, remote_head
 from test_github import pr, repo_line, status_payload
 
 from syncghrepo import cli, dash, local, save
@@ -188,6 +188,25 @@ def test_githubs_default_branch_is_protected_when_origin_head_is_stale(origin, c
     assert git(clone, "rev-parse", "develop") == mine  # no auto-commit on it either
     assert proj["branch"] == WIP and remote_head(origin, WIP) == git(clone, "rev-parse", "HEAD")
     assert "branch.develop.sync" not in git(clone, "config", "--list")  # never opted in
+
+
+def test_credentials_in_remote_urls_never_reach_the_report(tmp_path, origin, clone, capsys):
+    git(clone, "remote", "set-url", "origin",
+        f"https://x-access-token:{fake_token()}@github.com/benpshore/proj.git")  # fmt: skip
+    plain = tmp_path / "code" / "plain"
+    git(tmp_path, "init", "-q", str(plain))
+    commit(plain, "x.txt", "x\n")
+    git(plain, "remote", "add", "origin", "https://alice:hunter2@git.example.invalid/a/p.git")
+
+    cli.main(["--dry-run", "--json"], runner=FakeRunner(gh_replies()))
+
+    out = capsys.readouterr().out
+    assert fake_token() not in out and "hunter2" not in out
+    repos = {r["name"]: r for r in json.loads(out)["repos"]}
+    assert repos["plain"]["url"] == "https://git.example.invalid/a/p.git"
+    assert repos["plain"]["clones"][0]["origin"] == "https://git.example.invalid/a/p.git"
+    proj = repos["benpshore/proj"]["clones"][0]["origin"]
+    assert proj == "https://github.com/benpshore/proj.git"
 
 
 def test_conflict_exits_1(tmp_path, origin, clone, capsys):

@@ -25,6 +25,7 @@ BRANCH_FORMAT = (
     "%(refname:short)%09%(upstream:short)%09%(upstream:track,nobracket)%09%(committerdate:unix)"
 )
 PROTECTED = frozenset({"main", "master"})
+URL_USERINFO = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)([^/?#]*)@")
 SUBMODULE_LINE = re.compile(r"^([ +U-])[0-9a-f]+ (.+?)(?: \(.*\))?$")
 
 
@@ -32,6 +33,17 @@ def github_name(url: str | None) -> str | None:
     """owner/name for a GitHub remote URL (https, ssh or scp-style), else None."""
     match = GITHUB_URL.search(url.strip()) if url else None
     return f"{match[1]}/{match[2]}" if match else None
+
+
+def redact_url(url: str | None) -> str | None:
+    """A remote URL without credentials, fit for the report: scheme://user:token@host/...
+    loses its user info (ssh:// keeps a bare user name). scp-style user@host:path and
+    local paths are unchanged: they hold no password."""
+    match = URL_USERINFO.match(url) if url else None
+    if not match:
+        return url
+    user = match[2].partition(":")[0] if match[1].lower().startswith("ssh") else ""
+    return f"{match[1]}{user + '@' if user else ''}{url[match.end() :]}"
 
 
 def find_clones(
@@ -267,7 +279,7 @@ def inspect(runner: Runner, path: Path, *, stale_days: int = 30, now: float | No
 
     return {
         "path": str(path),
-        "origin": git.out("remote", "get-url", "origin"),
+        "origin": redact_url(git.out("remote", "get-url", "origin")),
         "branch": branch,
         "upstream": upstream,
         "upstream_gone": upstream_gone,

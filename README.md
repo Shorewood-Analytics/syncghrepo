@@ -306,7 +306,8 @@ succeeded), `new_clones` (cloned, or would be with `--dry-run`), `clones_skipped
 
 ### `repos[]`
 
-- `name`, `url`; `github` (bool); `fork`, `archived` (bool or null);
+- `name`, `url` (for a clone not on GitHub, its `origin` without credentials);
+  `github` (bool); `fork`, `archived` (bool or null);
   `default_branch`; `sources`: how it was found, from `owner`, `org`,
   `collaborator`, `contributed` (you opened PRs there), `local` (only cloned).
 - `attention` ([string]): the human summary lines.
@@ -329,11 +330,12 @@ succeeded), `new_clones` (cloned, or would be with `--dry-run`), `clones_skipped
 
 ### `clones[]`
 
-- `path`, `origin` (URL), `branch` (null if detached), `upstream`, `upstream_gone`,
-  `default_branch`, `head` (short SHA), `changes` (tracked files changed),
-  `untracked`, `busy` (`merge`, `rebase`, ... or null), `ahead`, `behind`,
-  `unpushed` (commits on HEAD on no remote), `fork`, `can_push`. All describe the
-  clone after the run.
+- `path`, `origin` (URL without credentials: `https://user:token@host/...` is shown
+  as `https://host/...`; `ssh://` keeps a bare user name), `branch` (null if
+  detached), `upstream`, `upstream_gone`, `default_branch`, `head` (short SHA),
+  `changes` (tracked files changed), `untracked`, `busy` (`merge`, `rebase`, ... or
+  null), `ahead`, `behind`, `unpushed` (commits on HEAD on no remote), `fork`,
+  `can_push`. All describe the clone after the run.
 - `status`: `up-to-date`, `updated`, `would-update` (`--dry-run`), `held-back`,
   `conflict`, `error` or `skipped`; `note` explains it.
 - `actions`: each `cmd`, `ok` (true/false; null with `--dry-run` or when skipped) and
