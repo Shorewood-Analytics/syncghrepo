@@ -331,10 +331,15 @@ def process(
         return remaining is not None and moved and not set(files) & set(remaining)
 
     head_before = git.out("rev-parse", "HEAD")
-    # git-sync checks the tree is clean after its commit with git diff, which counts
-    # edits inside a submodule; the parent cannot commit those.
-    env = gitsync.config_env(("diff.ignoreSubmodules", "dirty")) if submodules else None
-    result = runner([git_sync], where, env) if env else runner([git_sync], where)
+    # git-sync decides whether to commit from git status, which status.showUntrackedFiles=no
+    # would leave without the new files; and it checks the tree is clean after its
+    # commit with git diff, which counts edits inside a submodule (the parent cannot
+    # commit those).
+    settings = [("status.showUntrackedFiles", "normal")]
+    if submodules:
+        settings.append(("diff.ignoreSubmodules", "dirty"))
+    env = gitsync.config_env(*settings)
+    result = runner([git_sync], where, env)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
     if result.ok and files and not committed():
         left = sorted(set(files) & set(save.changed_paths(git) or files))
@@ -358,7 +363,7 @@ def process(
                 change=True,
                 note=f"rebase stopped; auto-resolved {len(report['resolved'])} conflict(s)",
             )
-            again = runner([git_sync], where, env) if env else runner([git_sync], where)
+            again = runner([git_sync], where, env)
             report["git_sync"] = {"code": again.code, "log": gitsync.log(again)}
             act("git-sync", ok=again.ok, note=gitsync.summary(again), change=True)
     else:

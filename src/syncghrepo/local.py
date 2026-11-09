@@ -244,7 +244,8 @@ def inspect(
     default = default_branch or seen
 
     changes = untracked = 0
-    for line in (git.out("status", "--porcelain") or "").splitlines():
+    # --untracked-files=normal: status.showUntrackedFiles=no must not hide new files.
+    for line in (git.out("status", "--porcelain", "--untracked-files=normal") or "").splitlines():
         if line.startswith("??"):
             untracked += 1
         elif line.strip():

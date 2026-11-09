@@ -226,6 +226,27 @@ def test_unpushed_scan_checks_names_sizes_and_only_unpushed_commits(origin, clon
     }
 
 
+def test_new_files_are_saved_when_git_status_hides_untracked_files(origin, clone):
+    feature(clone)
+    git(clone, "config", "status.showUntrackedFiles", "no")  # common in big repos
+    (clone / "notes.md").write_text("new notes\n")
+
+    result, _ = apply(clone)
+
+    assert result["status"] == "updated", result["actions"]
+    assert result["saved"]["files"] == ["notes.md"]
+    assert "notes.md" in git(origin.bare, "ls-tree", "--name-only", "feat").split()
+    assert git(clone, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+def test_hidden_untracked_files_are_still_counted(origin, clone):
+    feature(clone)
+    git(clone, "config", "status.showUntrackedFiles", "no")
+    (clone / "notes.md").write_text("new notes\n")
+    result, _ = apply(clone, can_push=False)  # left as is: must still need attention
+    assert result["untracked"] == 1
+
+
 def test_ignored_files_are_never_committed(origin, clone):
     feature(clone)
     (clone / ".gitignore").write_text("*.log\n")
