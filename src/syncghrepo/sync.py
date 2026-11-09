@@ -31,6 +31,7 @@ from .run import Git, Result, Runner
 BACKUP_PREFIX = "refs/syncghrepo/backup"
 OPT_IN = ("sync", "syncNewFiles")
 STATUS_FAILED = "git status failed; secret check and file limit not run, clone left alone"
+STATUS_CMD = "git status --porcelain=v1 -z --untracked-files=all"
 
 
 def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | None, str]:
@@ -148,6 +149,7 @@ def process(
     # If git status fails the check cannot run, so the clone is skipped too.
     held = save.held_back(git, path)
     if held is None:
+        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
         return finish("error", STATUS_FAILED)
     report["held_back"] = held
     if report["held_back"]:
@@ -167,6 +169,7 @@ def process(
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
     files = save.changed_paths(git)
     if files is None:
+        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
         return finish("error", STATUS_FAILED)
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (

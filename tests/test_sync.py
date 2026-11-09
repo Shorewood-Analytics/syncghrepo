@@ -451,6 +451,7 @@ def test_failed_change_list_skips_the_clone(origin, clone, fail, name):
     commit(clone, "c.txt", "local\n")
     (clone / name).write_text("X=1\n")
     before = remote_head(origin, "feat")
+    local_before = git(clone, "rev-parse", "HEAD")
     calls = []
 
     def status_fails(cmd):
@@ -462,7 +463,10 @@ def test_failed_change_list_skips_the_clone(origin, clone, fail, name):
 
     result, runner = apply(clone, FakeRunner(git_hook=status_fails))
     assert result["status"] == "error" and "git status failed" in result["note"]
+    assert result["actions"][-1]["ok"] is False
+    assert "git status failed" in result["actions"][-1]["note"]
     assert runner.git_sync_calls() == []
+    assert git(clone, "rev-parse", "HEAD") == local_before
     assert ("fetch" in runner.git_subcommands()) == (1 not in fail)
     assert remote_head(origin, "feat") == before
     assert name not in git(origin.bare, "ls-tree", "--name-only", "feat")
