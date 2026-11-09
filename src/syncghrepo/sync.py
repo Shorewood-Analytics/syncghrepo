@@ -316,11 +316,15 @@ def process(
     # Last look right before git-sync commits (git add -A): the push above took a while.
     if held := secret_check("not committed"):
         return held
+    if busy := local.busy(git):  # started by someone else since the start: not ours
+        return finish("skipped", f"{busy} in progress; left alone")
     result = runner([git_sync], where)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
     if result.ok:
         act("git-sync", ok=True, note=gitsync.summary(result), change=gitsync.did_something(result))
-    elif local.busy(git) == "rebase":
+    elif result.code == 1 and local.busy(git) == "rebase":
+        # git-sync's own rebase stopped. Exit 2 (unsafe state) means it found one already
+        # in progress and did nothing: that one is someone else's and is left alone.
         report["resolved"], report["conflicts"] = resolve.finish_rebase(git, runner, path)
         if report["conflicts"]:
             names = ", ".join(c["path"] or "?" for c in report["conflicts"])

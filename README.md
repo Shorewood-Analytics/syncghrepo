@@ -78,7 +78,8 @@ it and reports what happened:
    tree exists). Then `git-sync` runs. It commits ("changes from <host> on
    <date>"), fetches, fast-forwards or rebases, and pushes. It never forces.
 6. **Conflicts.** git-sync leaves a conflicted rebase in progress. syncghrepo then
-   resolves trivial conflicts:
+   resolves trivial conflicts (only in git-sync's own rebase: one someone else
+   started meanwhile is left alone):
    - *identical*: both sides made the same change;
    - *whitespace*: the sides differ only in trailing whitespace, line endings or
      trailing blank lines; mine is kept. Indentation is never ignored;

@@ -3,7 +3,9 @@
 
 import hashlib
 import re
+import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from conftest import GIT_SYNC, FakeRunner, commit, fake_token, git, remote_head
@@ -343,6 +345,52 @@ def test_real_conflict_is_aborted_and_nothing_is_lost(origin, clone):
     again, _ = apply(clone)  # still conflicted: the same backup is reused, not duplicated
     assert again["backup_refs"] == [backup]
     assert git(clone, "for-each-ref", "refs/syncghrepo").count("\n") == 0
+
+
+class RebaseStartsInsideGitSync(FakeRunner):
+    """git-sync is about to run when someone starts a rebase: the race git-sync's exit 2
+    (unsafe state, nothing done) reports."""
+
+    def __init__(self, start):
+        super().__init__()
+        self.start = start
+
+    def __call__(self, cmd, cwd=None, env=None):
+        if Path(cmd[0]).name == "git-sync" and len(cmd) == 1:
+            self.start()
+        return super().__call__(cmd, cwd, env)
+
+
+@pytest.mark.parametrize("when", ["before git-sync", "inside git-sync"])
+def test_someone_elses_rebase_is_never_taken_over(origin, clone, when):
+    """A rebase syncghrepo did not start is left exactly as it is: never aborted or
+    continued, and the person's conflict resolution in progress is kept."""
+    git(clone, "switch", "-q", "-c", "other")
+    commit(clone, "a.txt", "other side\n")
+    git(clone, "switch", "-q", "main")
+    feature(clone)
+    commit(clone, "a.txt", "feat side\n")  # a local commit to push: git-sync will run
+
+    def start_rebase():
+        rebase = subprocess.run(["git", "rebase", "other"], cwd=clone, capture_output=True)
+        assert rebase.returncode != 0  # stops on the conflict in a.txt
+        (clone / "a.txt").write_text("my careful manual resolution\n")
+
+    def hook(cmd):
+        if "branch.feat.syncNewFiles" in cmd and "--get" not in cmd:  # after the check
+            start_rebase()
+
+    runner = (
+        FakeRunner(git_hook=hook) if when == "before git-sync" else RebaseStartsInsideGitSync(
+            start_rebase)
+    )  # fmt: skip
+    result, _ = apply(clone, runner)
+
+    assert (clone / "a.txt").read_text() == "my careful manual resolution\n"
+    assert (clone / ".git" / "rebase-merge").is_dir()  # still that person's rebase
+    assert not {"git rebase --abort", "git rebase --continue"} & set(cmds(result))
+    assert result["status"] in ("skipped", "error") and "nothing lost" not in result["note"]
+    assert result["conflicts"] == [] and result["busy"] == "rebase"
 
 
 def test_rejected_push_is_reported_never_forced(origin, clone):
