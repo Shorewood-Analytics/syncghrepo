@@ -649,3 +649,81 @@ def test_failed_change_list_skips_the_clone(origin, clone, fail, name):
     assert remote_head(origin, "feat") == before
     assert name not in git(origin.bare, "ls-tree", "--name-only", "feat")
     assert_safe(runner)
+
+
+def test_failed_submodule_scan_skips_the_clone(origin, clone):
+    """If only the submodule scan's git status fails, a moved submodule could not be
+    held back: the clone is an error and nothing is committed or pushed."""
+    feature(clone)
+    commit(clone, "c.txt", "local\n")
+    (clone / "x.txt").write_text("x\n")
+    before = remote_head(origin, "feat")
+    local_before = git(clone, "rev-parse", "HEAD")
+
+    def scan_fails(cmd):
+        if "status" in cmd and "--porcelain=v2" in cmd:
+            return Result(124, "", "git timed out after 120s")
+        return None
+
+    result, runner = apply(clone, FakeRunner(git_hook=scan_fails))
+    assert result["status"] == "error" and "git status failed" in result["note"]
+    assert result["actions"] == [
+        {
+            "cmd": "git status --porcelain=v2 -z --untracked-files=all",
+            "ok": False,
+            "note": f"{sync.STATUS_FAILED}: git timed out after 120s",
+        }
+    ]
+    assert runner.git_sync_calls() == []
+    assert git(clone, "rev-parse", "HEAD") == local_before
+    assert remote_head(origin, "feat") == before
+    assert "x.txt" not in git(origin.bare, "ls-tree", "--name-only", "feat")
+    assert_safe(runner)
+
+
+@pytest.mark.parametrize(
+    ("read", "porcelain"), [(save.changed_paths, "v1"), (save.changed_submodules, "v2")]
+)
+def test_failed_git_status_raises(tmp_path, read, porcelain):
+    def runner(cmd, cwd=None, env=None):
+        return Result(128, "", "fatal: index file corrupt\n")
+
+    with pytest.raises(save.StatusFailed) as failed:
+        read(Git(runner, tmp_path))
+    assert failed.value.cmd == f"git status --porcelain={porcelain} -z --untracked-files=all"
+    assert failed.value.detail == "fatal: index file corrupt"
+
+
+class StatusFailsAfterGitSync(FakeRunner):
+    """Every porcelain=v1 git status fails once git-sync itself has run."""
+
+    def __init__(self):
+        super().__init__(git_hook=self.hook)
+        self.synced = False
+
+    def hook(self, cmd):
+        if self.synced and "status" in cmd and "--porcelain=v1" in cmd:
+            return Result(124, "", "git timed out after 120s")
+        return None
+
+    def __call__(self, cmd, cwd=None, env=None):
+        result = super().__call__(cmd, cwd, env)
+        if cmd and cmd[0] == str(GIT_SYNC) and len(cmd) == 1:
+            self.synced = True
+        return result
+
+
+def test_failed_status_after_git_sync_is_reported_not_raised(origin, clone):
+    """The reads after git-sync only shape the report: a failed status there must not
+    escape process() (the CLI calls it per clone without a try) and is reported as an
+    unconfirmed auto-commit, as before."""
+    feature(clone)
+    (clone / "x.txt").write_text("x\n")
+    runner = StatusFailsAfterGitSync()
+
+    result, _ = apply(clone, runner)
+
+    assert runner.synced
+    assert result["status"] == "error"
+    assert "auto-commit did not complete" in result["note"] and "x.txt" in result["note"]
+    assert_safe(runner)
