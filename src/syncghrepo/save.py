@@ -3,7 +3,8 @@
 git-sync makes the commits (git add -A, so ignored files are never added). Before
 that, if any changed file is secret-looking (by name or content) or very large, the
 whole clone is skipped and the files reported: nothing is committed, synced or
-pushed there until a person looks.
+pushed there until a person looks. The same check covers files in commits that are
+on no remote yet, before syncghrepo pushes them.
 """
 
 import re
@@ -101,3 +102,44 @@ def held_back(git: Git, root: Path) -> list[dict]:
     """Changed files that must never be committed: secret-looking or too large."""
     paths = changed_paths(git) or []
     return [{"path": p, "reason": r} for p in paths if (r := hold_reason(root, p))]
+
+
+def blob_reason(git: Git, path: str, mode: str, blob: str) -> str | None:
+    """hold_reason for a file as committed: mode and blob as in git log --raw."""
+    if not blob.strip("0"):
+        return None  # deleted: pushing the deletion is safe
+    if SECRET_NAME.search(path):
+        return "secret-looking file name"
+    if mode not in ("100644", "100755"):
+        return None  # a symlink or a submodule
+    size = git.out("cat-file", "-s", blob)
+    if not size or not size.isdigit():
+        return "unreadable"
+    if int(size) > MAX_FILE_BYTES:
+        return f"larger than {MAX_FILE_BYTES // 2**20} MB"
+    data = git("cat-file", "blob", blob)
+    if not data.ok:
+        return f"unreadable: {data.last_line()}"
+    if SECRET_TEXT.search(data.out.encode("utf-8", "surrogateescape")):
+        return "contains a secret-looking string"
+    return None
+
+
+def unpushed_held_back(git: Git) -> list[dict]:
+    """Files in commits on HEAD that are on no remote (pushing HEAD publishes them) that
+    must never be pushed: secret-looking or too large, in any of those commits."""
+    listing = git("log", "--root", "--raw", "--no-renames", "--no-abbrev", "-z", "--format=",
+                  "HEAD", "--not", "--remotes")  # fmt: skip
+    if not listing.ok:
+        return [{"path": "HEAD", "reason": f"commits not checked: {listing.last_line()}"}]
+    found: dict[str, str] = {}
+    fields = iter(listing.out.split("\0"))
+    for meta in fields:  # ":<old mode> <new mode> <old blob> <new blob> <status>", then path
+        parts = meta.strip().split(" ")
+        if len(parts) != 5 or not parts[0].startswith(":"):
+            continue
+        path = next(fields, "")
+        if path not in found and (reason := blob_reason(git, path, parts[1], parts[3])):
+            found[path] = reason
+    return [{"path": path, "reason": f"{reason} (in a commit on no remote)"}
+            for path, reason in sorted(found.items())]  # fmt: skip

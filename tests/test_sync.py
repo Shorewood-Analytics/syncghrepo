@@ -169,6 +169,48 @@ def test_secret_hit_skips_the_whole_clone(origin, clone, monkeypatch):
     assert_safe(runner)
 
 
+def test_secrets_in_commits_on_no_remote_are_never_pushed(origin, clone):
+    git(clone, "switch", "-q", "-c", "experiment")  # local only: syncghrepo would push it
+    commit(clone, ".env", "API_KEY=x\n")
+    commit(clone, "settings.py", "TOKEN = '" + fake_token() + "'\n")
+    commit(clone, "settings.py", "TOKEN = None\n")  # removed again, but still in history
+    commit(clone, "ok.py", "print('hi')\n")
+    (clone / "notes.txt").write_text("uncommitted\n")
+
+    result, runner = apply(clone)
+
+    held = {h["path"]: h["reason"] for h in result["held_back"]}
+    assert set(held) == {".env", "settings.py"}, result["actions"]
+    assert "secret-looking string" in held["settings.py"]
+    assert fake_token() not in str(result)
+    assert result["status"] == "held-back" and "not pushed" in result["note"]
+    assert remote_head(origin, "experiment") is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+    assert git(clone, "status", "--porcelain") == "?? notes.txt"
+    assert_safe(runner)
+
+
+def test_secrets_in_local_default_branch_commits_do_not_leave_on_a_wip_branch(origin, clone):
+    commit(clone, "deploy.cfg", "token = " + fake_token() + "\n")
+    (clone / "notes.txt").write_text("uncommitted\n")
+    result, runner = apply(clone)
+    assert [h["path"] for h in result["held_back"]] == ["deploy.cfg"]
+    assert result["status"] == "held-back"
+    assert git(clone, "branch", "--show-current") == "main"
+    assert git(origin.bare, "for-each-ref", "refs/heads/wip") == ""
+    assert "push" not in runner.git_subcommands()
+
+
+def test_commits_already_on_a_remote_are_not_checked_again(origin, clone):
+    feature(clone)
+    commit(clone, "fixture.db", "pushed earlier\n")
+    git(clone, "push", "-q")
+    commit(clone, "ok.py", "print('hi')\n")
+    result, _ = apply(clone)
+    assert result["status"] == "updated" and result["held_back"] == []
+    assert remote_head(origin, "feat") == head(clone)
+
+
 def test_ignored_files_are_never_committed(origin, clone):
     feature(clone)
     (clone / ".gitignore").write_text("*.log\n")

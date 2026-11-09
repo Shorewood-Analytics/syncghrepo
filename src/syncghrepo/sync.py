@@ -214,6 +214,16 @@ def process(
         )
         return done()
 
+    # Commits on no remote are about to be pushed (push -u or git-sync): check them too.
+    if info["unpushed"]:
+        report["held_back"] = save.unpushed_held_back(git)
+        if report["held_back"]:
+            names = ", ".join(h["path"] for h in report["held_back"][:5])
+            return finish(
+                "held-back",
+                f"secret-looking or oversized files in local commits ({names}); not pushed",
+            )
+
     # git-sync's own read-only check: refuses staged changes, odd file states, ...
     if remote:
         check = runner([git_sync, "-s", "-n", "check"], where)

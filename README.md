@@ -50,14 +50,17 @@ it and reports what happened:
    `.envrc`, keys, `credentials*`, databases, ...), contains a secret-looking
    string (GitHub/AWS/Slack/OpenAI/Google tokens, private keys) or is over 50 MB,
    the whole clone is skipped and the files are reported. Over 2,000 changed files
-   (a missing `.gitignore`?) is skipped too.
+   (a missing `.gitignore`?) is skipped too. Files in local commits that are on no
+   remote yet get the same check before syncghrepo pushes them (a local-only branch,
+   or local default-branch commits moving to a `wip/` branch).
 2. **Never the default branch.** git-sync never runs on the default branch (GitHub's,
    and the clone's `origin/HEAD`, which `git fetch` does not update) or on
    `main`/`master`. Uncommitted work found there moves to a new
    `wip/<YYYYMMDD>-<host>` branch (`-2`, `-3`, ... if taken), which is pushed so it
    has the same-named remote branch git-sync needs. The default branch itself is
    only fast-forwarded (`git merge --ff-only`, or `git fetch . origin/main:main`
-   when it is not checked out); local commits on it are reported, never pushed.
+   when it is not checked out); local commits on it are reported, never pushed to
+   it (with uncommitted work, they move to the `wip/` branch too).
 3. **Opt in.** Only for a branch with something to sync, and only if GitHub says
    you can push: `git config --bool branch.<b>.sync true` and
    `branch.<b>.syncNewFiles true` (so new, non-ignored files are committed;
@@ -275,7 +278,7 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 | `conflict` | `path:branch` | pull aborted on conflicts that need a person; `detail` lists files and the backup ref |
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
-| `held_back` | `path:file` | secret-looking or oversized file; the whole clone was skipped |
+| `held_back` | `path:file` | secret-looking or oversized file, uncommitted or in a commit on no remote; the clone was not saved or pushed |
 | `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, or a branch git-sync cannot handle |
 | `unpushed_branch` | `path:branch` | another local branch with commits on no remote |
 | `gone_branch` | `path:branch` | local branch whose upstream was deleted (merged?) |
