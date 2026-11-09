@@ -280,6 +280,7 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
 | `held_back` | `path:file` | secret-looking or oversized file; the whole clone was skipped |
+| `save_skipped` | `path:branch` | over 2,000 changed files (a missing `.gitignore`?); the whole clone was skipped; `detail` says how many |
 | `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, or a branch git-sync cannot handle |
 | `unpushed_branch` | `path:branch` | another local branch with commits on no remote |
 | `gone_branch` | `path:branch` | local branch whose upstream was deleted (merged?) |

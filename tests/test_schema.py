@@ -11,10 +11,10 @@ import re
 from pathlib import Path
 
 from conftest import FakeRunner, commit, git
-from test_cli import point_origin_at_github
+from test_cli import gh_replies, point_origin_at_github
 from test_github import pr, repo_line, status_payload
 
-from syncghrepo import cli
+from syncghrepo import cli, save
 from syncghrepo.run import Result
 
 SCHEMA_VERSION = 1
@@ -38,7 +38,8 @@ SUMMARY = {
 ITEM = {"id", "kind", "repo", "title", "url", "path", "branch", "flags", "updated_at", "detail"}
 KINDS = {"pr", "issue", "ci_failing", "github_error", "conflict", "error", "skipped",
          "held_back", "not_pushed", "unpushed_branch", "gone_branch", "stale_branch", "stash",
-         "worktree", "remote_stale_branch", "fork_sync_failed", "clone_skipped"}  # fmt: skip
+         "worktree", "remote_stale_branch", "fork_sync_failed", "clone_skipped",
+         "save_skipped"}  # fmt: skip
 REPO = {"name", "url", "github", "fork", "archived", "default_branch", "sources", "clones",
         "remote", "remote_error", "attention", "fork_sync"}  # fmt: skip
 REMOTE = {"name", "url", "fork", "archived", "parent", "can_push", "default_branch", "ci",
@@ -159,3 +160,26 @@ def test_readme_documents_every_field_and_kind():
               | STASH | ACTION | GIT_SYNC_RUN | SAVED | HELD | CONFLICT | GH_DASH | MODES
               | CLONE_RECORD | NESTED | REMOTE_BRANCH | FORK_SYNC)  # fmt: skip
     assert sorted(fields - documented) == []
+
+
+def test_a_clone_skipped_for_too_many_files_is_an_item(origin, clone, capsys):
+    # Real work in a.txt, plus build output that a missing .gitignore lets through.
+    git(clone, "switch", "-q", "-c", "feat")
+    git(clone, "push", "-q", "-u", "origin", "feat")
+    point_origin_at_github(clone)
+    out = clone / "out"
+    out.mkdir()
+    for n in range(save.MAX_FILES + 1):
+        (out / f"f{n}.txt").write_text(f"{n}\n")
+    (clone / "a.txt").write_text("real work\n")
+
+    code = cli.main(["--json"], runner=FakeRunner(gh_replies()))
+
+    report = json.loads(capsys.readouterr().out)
+    (entry,) = [i for i in report["items"] if i["kind"] == "save_skipped"]
+    assert set(entry) == ITEM and entry["kind"] in KINDS
+    assert entry["id"] == f"save_skipped:{clone.resolve()}:feat"
+    assert (entry["path"], entry["branch"]) == (str(clone.resolve()), "feat")
+    assert entry["detail"].startswith(f"{save.MAX_FILES + 2} files changed")
+    assert report["summary"]["items"]["save_skipped"] == 1
+    assert code == 1

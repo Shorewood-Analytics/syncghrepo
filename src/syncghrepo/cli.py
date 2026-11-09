@@ -304,6 +304,17 @@ def work_items(repos: list[dict]) -> list[dict]:
                         **at,
                     )
                 )
+            if clone["save_skipped"]:  # too many changed files: the clone was skipped
+                items.append(
+                    item(
+                        "save_skipped",
+                        f"{path}:{current}",
+                        repo,
+                        f"nothing saved in {local.short_path(path)}",
+                        detail=clone["save_skipped"],
+                        **at,
+                    )
+                )
             for held in clone["held_back"]:
                 items.append(
                     item(
