@@ -137,6 +137,15 @@ def process(
             )
             act(cmd, fetched, note, change=True)
 
+    def secret_check(outcome: str) -> dict | None:
+        """The finished report if a changed file is secret-looking or too large."""
+        report["held_back"] = save.held_back(git, path)
+        if not report["held_back"]:
+            return None
+        report["saved"] = None
+        files = ", ".join(h["path"] for h in report["held_back"][:5])
+        return finish("held-back", f"secret-looking or oversized files ({files}); {outcome}")
+
     info = inspect()
     if info["busy"]:
         return finish("skipped", f"{info['busy']} in progress; left alone")
@@ -146,10 +155,8 @@ def process(
         return finish("skipped", f"no commits yet on {info['branch']}; left alone")
 
     # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
-    report["held_back"] = save.held_back(git, path)
-    if report["held_back"]:
-        files = ", ".join(h["path"] for h in report["held_back"][:5])
-        return finish("held-back", f"secret-looking or oversized files ({files}); clone skipped")
+    if held := secret_check("clone skipped"):
+        return held
 
     # 2. Forks: bring the fork on GitHub up to date with its parent (never --force).
     if fork and can_push:
@@ -160,6 +167,8 @@ def process(
     if not dry_run or fetch:
         act("git fetch --prune", git("fetch", "--quiet", "--prune"))
         info = inspect()
+        if held := secret_check("clone skipped"):  # files written while it fetched
+            return held
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
     files = save.changed_paths(git) or []
@@ -304,6 +313,9 @@ def process(
         act("git-sync", note=note, change=True)
         return done()
 
+    # Last look right before git-sync commits (git add -A): the push above took a while.
+    if held := secret_check("not committed"):
+        return held
     result = runner([git_sync], where)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
     if result.ok:

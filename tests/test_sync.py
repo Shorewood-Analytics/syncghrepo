@@ -211,6 +211,28 @@ def test_commits_already_on_a_remote_are_not_checked_again(origin, clone):
     assert remote_head(origin, "feat") == head(clone)
 
 
+@pytest.mark.parametrize("during", ["fetch", "push"])
+def test_secrets_that_appear_during_the_run_are_never_committed(origin, clone, during):
+    git(clone, "switch", "-q", "-c", "idea")  # local only, so it is pushed with -u first
+    commit(clone, "i.txt", "idea\n")
+    (clone / "notes.txt").write_text("work\n")
+
+    def write_secrets(cmd):  # e.g. a dev server or agent writing in the clone meanwhile
+        if during in cmd:
+            (clone / ".env").write_text("API_KEY=x\n")
+            (clone / "app.db").write_text("data\n")
+
+    result, runner = apply(clone, FakeRunner(git_hook=write_secrets))
+
+    assert result["status"] == "held-back", result["actions"]
+    assert {h["path"] for h in result["held_back"]} == {".env", "app.db"}
+    assert result["saved"] is None
+    assert [] not in runner.git_sync_calls()  # git-sync itself never ran
+    assert git(clone, "status", "--porcelain").splitlines() == ["?? .env", "?? app.db",
+                                                                "?? notes.txt"]  # fmt: skip
+    assert not (remote_head(origin, "idea") and git(origin.bare, "ls-tree", "idea", ".env"))
+
+
 def test_ignored_files_are_never_committed(origin, clone):
     feature(clone)
     (clone / ".gitignore").write_text("*.log\n")

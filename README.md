@@ -49,10 +49,12 @@ it and reports what happened:
 1. **Secret check.** If any changed file has a secret-looking name (`.env`,
    `.envrc`, keys, `credentials*`, databases, ...), contains a secret-looking
    string (GitHub/AWS/Slack/OpenAI/Google tokens, private keys) or is over 50 MB,
-   the whole clone is skipped and the files are reported. Over 2,000 changed files
-   (a missing `.gitignore`?) is skipped too. Files in local commits that are on no
-   remote yet get the same check before syncghrepo pushes them (a local-only branch,
-   or local default-branch commits moving to a `wip/` branch).
+   the whole clone is skipped and the files are reported. The check runs again after
+   the fetch and right before git-sync commits, for files written meanwhile. Over
+   2,000 changed files (a missing `.gitignore`?) is skipped too. Files in local
+   commits that are on no remote yet get the same check before syncghrepo pushes
+   them (a local-only branch, or local default-branch commits moving to a `wip/`
+   branch).
 2. **Never the default branch.** git-sync never runs on the default branch (GitHub's,
    and the clone's `origin/HEAD`, which `git fetch` does not update) or on
    `main`/`master`. Uncommitted work found there moves to a new
