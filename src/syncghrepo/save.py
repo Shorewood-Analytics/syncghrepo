@@ -146,19 +146,25 @@ def unpushed_held_back(git: Git) -> list[dict] | None:
     found: dict[str, str] = {}
     content: dict[tuple[str, str], str | None] = {}  # (mode, blob) -> reason
     for sha in commits.split():
-        listed = git("diff-tree", "-r", "-z", "--root", "--no-commit-id", "--no-renames",
-                     "--diff-filter=AM", sha)  # fmt: skip
+        # Every file the commit adds or changes, type changes included. For a merge,
+        # -c lists the files that differ from every parent (a conflict resolution or
+        # an "evil merge"); the rest is a parent's, scanned there or already pushed.
+        listed = git("diff-tree", "-r", "-z", "-c", "--root", "--no-commit-id",
+                     "--no-renames", "--diff-filter=d", sha)  # fmt: skip
         if not listed.ok:
             return None
-        fields = listed.out.split("\0")  # ":<mode> <mode> <blob> <blob> <status>", <path>
+        # ":<mode> <mode> <blob> <blob> <status>", <path>; a merge has one colon, mode
+        # and blob per parent, then the commit's own mode and blob last.
+        fields = listed.out.split("\0")
         for meta, rel in zip(fields[::2], fields[1::2], strict=False):
-            parts = meta.split()
-            if rel in found or len(parts) < 4:
+            parents = len(meta) - len(meta.lstrip(":"))
+            parts = meta.lstrip(":").split()
+            if rel in found or not parents or len(parts) < 2 * parents + 2:
                 continue
             if SECRET_NAME.search(rel):
                 reason = "secret-looking file name"
             else:
-                key = (parts[1], parts[3])
+                key = (parts[parents], parts[2 * parents + 1])
                 if key not in content:
                     content[key] = blob_reason(git, *key)
                 reason = content[key]

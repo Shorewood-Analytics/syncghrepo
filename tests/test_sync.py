@@ -245,6 +245,58 @@ def test_unpushed_scan_checks_names_sizes_and_only_unpushed_commits(origin, clon
     }
 
 
+def test_secret_added_in_a_merge_commit_is_not_published(origin, clone):
+    # A merge commit's own changes (a conflict resolution, an "evil merge") are
+    # published by git push -u like those of any other commit.
+    git(clone, "switch", "-q", "-c", "side")
+    commit(clone, "side.txt", "side work\n")
+    git(clone, "switch", "-q", "-c", "local-only", "main")
+    commit(clone, "ok.py", "print('hi')\n")
+    git(clone, "merge", "-q", "--no-commit", "side")
+    (clone / "config.py").write_text("TOKEN = '" + fake_token() + "'\n")
+    git(clone, "add", "config.py")
+    git(clone, "commit", "-q", "-m", "merge side")
+    (clone / "more.txt").write_text("more\n")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "held-back", report["actions"]
+        (held,) = report["held_back"]
+        assert held["path"] == "config.py"
+        assert held["reason"].startswith("contains a secret-looking string, in unpushed commit ")
+    assert fake_token() not in str(result)
+    assert remote_head(origin, "local-only") is None
+    assert "push" not in runner.git_subcommands() and runner.git_sync_calls() == []
+
+
+def test_unpushed_scan_sees_merge_resolutions_and_type_changes(origin, clone):
+    (clone / "settings.py").symlink_to("a.txt")
+    git(clone, "add", "settings.py")
+    git(clone, "commit", "-q", "-m", "link")
+    git(clone, "push", "-q", "origin", "main")  # a published symlink: no content
+    git(clone, "switch", "-q", "-c", "side")
+    commit(clone, "c.txt", "side\n")
+    git(clone, "switch", "-q", "-c", "x", "main")
+    (clone / "settings.py").unlink()  # symlink -> regular file: a type change (T)
+    commit(clone, "settings.py", "TOKEN = '" + fake_token() + "'\n")
+    commit(clone, "c.txt", "mine\n")
+    git(clone, "merge", "-q", "--no-commit", "-s", "ours", "side")
+    (clone / "c.txt").write_text("resolved " + fake_token() + "\n")  # in neither parent
+    (clone / ".env").write_text("added by the merge\n")
+    git(clone, "add", "c.txt", ".env")
+    git(clone, "commit", "-q", "-m", "merge side")
+
+    held = save.unpushed_held_back(Git(FakeRunner(), clone))
+
+    assert {h["path"]: h["reason"].split(",")[0] for h in held} == {
+        ".env": "secret-looking file name",
+        "c.txt": "contains a secret-looking string",
+        "settings.py": "contains a secret-looking string",
+    }
+
+
 def test_new_files_are_saved_when_git_status_hides_untracked_files(origin, clone):
     feature(clone)
     git(clone, "config", "status.showUntrackedFiles", "no")  # common in big repos

@@ -53,7 +53,8 @@ it and reports what happened:
    (a missing `.gitignore`?) is skipped too. Before a branch gets a new remote
    branch (a local-only branch's first push, or a `wip/` branch that carries the
    default branch's local commits), the files added or changed by its commits that
-   are on no remote yet are checked the same way. Commits on a branch that is
+   are on no remote yet (merge commits' own changes and file type changes
+   included) are checked the same way. Commits on a branch that is
    already pushed are pushed by git-sync without this check.
 2. **Never the default branch.** git-sync never runs on the default branch (as
    GitHub reports it, and as the clone's `origin/HEAD` says, which can be missing or
