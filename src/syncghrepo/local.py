@@ -203,9 +203,10 @@ def busy(git: Git) -> str | None:
     )
 
 
-def is_protected(branch: str | None, default: str | None) -> bool:
-    """Work is never committed or pushed to the default branch (or main/master)."""
-    return branch is not None and (branch == default or branch in PROTECTED)
+def is_protected(branch: str | None, *defaults: str | None) -> bool:
+    """Work is never committed or pushed to a default branch (or main/master). Pass every
+    known default: origin/HEAD is only set at clone time, GitHub's may have changed since."""
+    return branch is not None and (branch in defaults or branch in PROTECTED)
 
 
 def inspect(runner: Runner, path: Path, *, stale_days: int = 30, now: float | None = None) -> dict:

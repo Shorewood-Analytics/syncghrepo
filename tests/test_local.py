@@ -54,6 +54,12 @@ def test_is_protected(branch, default, protected):
     assert local.is_protected(branch, default) is protected
 
 
+def test_every_known_default_branch_is_protected():
+    assert local.is_protected("develop", "main", "develop")  # stale origin/HEAD, GitHub's
+    assert local.is_protected("develop", None, "develop")  # no origin/HEAD at all
+    assert not local.is_protected("feat", "main", "develop")
+
+
 def test_inspect_reports_branches_stashes_and_worktrees(tmp_path, origin, clone):
     git(clone, "switch", "-q", "-c", "wip")
     commit(clone, "w.txt", "wip\n")

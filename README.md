@@ -51,8 +51,9 @@ it and reports what happened:
    string (GitHub/AWS/Slack/OpenAI/Google tokens, private keys) or is over 50 MB,
    the whole clone is skipped and the files are reported. Over 2,000 changed files
    (a missing `.gitignore`?) is skipped too.
-2. **Never the default branch.** git-sync never runs on the default branch (or
-   `main`/`master`). Uncommitted work found there moves to a new
+2. **Never the default branch.** git-sync never runs on the default branch (GitHub's,
+   and the clone's `origin/HEAD`, which `git fetch` does not update) or on
+   `main`/`master`. Uncommitted work found there moves to a new
    `wip/<YYYYMMDD>-<host>` branch (`-2`, `-3`, ... if taken), which is pushed so it
    has the same-named remote branch git-sync needs. The default branch itself is
    only fast-forwarded (`git merge --ff-only`, or `git fetch . origin/main:main`

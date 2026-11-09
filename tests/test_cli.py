@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 
 import pytest
-from conftest import FakeRunner, git, remote_head
+from conftest import FakeRunner, commit, git, remote_head
 from test_github import pr, repo_line, status_payload
 
 from syncghrepo import cli, dash, local, save
@@ -163,6 +163,31 @@ def test_read_only_permission_means_no_push(tmp_path, origin, clone, capsys):
     assert cli.main([], runner=runner) == 1  # the work is still uncommitted
     assert "push" not in runner.git_subcommands()
     assert "not synced: no known push access; local work left as is" in capsys.readouterr().out
+
+
+def test_githubs_default_branch_is_protected_when_origin_head_is_stale(origin, clone, capsys):
+    """origin/HEAD is set at clone time and git fetch never moves it, so GitHub's
+    default branch must be protected too: work on it goes to a wip/ branch."""
+    point_origin_at_github(clone)
+    git(origin.seed, "push", "-q", "origin", "main:develop")
+    git(origin.bare, "symbolic-ref", "HEAD", "refs/heads/develop")  # default changed on GitHub
+    git(clone, "fetch", "-q")
+    git(clone, "switch", "-q", "develop")  # tracks origin/develop
+    commit(clone, "local.txt", "not pushed\n")
+    (clone / "a.txt").write_text("half-done\n")
+    develop, mine = remote_head(origin, "develop"), git(clone, "rev-parse", "HEAD")
+    payload = status_payload("benpshore/proj", default="develop")
+    replies = gh_replies() | {("api", "graphql"): lambda cmd: Result(0, payload)}
+
+    cli.main(["--json"], runner=FakeRunner(replies))
+
+    report = json.loads(capsys.readouterr().out)
+    (proj,) = next(r for r in report["repos"] if r["name"] == "benpshore/proj")["clones"]
+    assert proj["default_branch"] == "main"  # the stale origin/HEAD
+    assert remote_head(origin, "develop") == develop  # nothing pushed to the default branch
+    assert git(clone, "rev-parse", "develop") == mine  # no auto-commit on it either
+    assert proj["branch"] == WIP and remote_head(origin, WIP) == git(clone, "rev-parse", "HEAD")
+    assert "branch.develop.sync" not in git(clone, "config", "--list")  # never opted in
 
 
 def test_conflict_exits_1(tmp_path, origin, clone, capsys):

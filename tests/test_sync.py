@@ -378,6 +378,19 @@ def test_commits_on_main_are_never_pushed(origin, clone):
     assert any("not pushed" in a["note"] for a in result["actions"])
 
 
+def test_githubs_default_branch_is_protected_without_origin_head(origin, clone):
+    git(origin.seed, "push", "-q", "origin", "main:develop")
+    git(clone, "fetch", "-q")
+    git(clone, "switch", "-q", "develop")
+    git(clone, "remote", "set-head", "origin", "-d")  # e.g. git init + git remote add
+    (clone / "a.txt").write_text("half-done\n")
+    before = remote_head(origin, "develop")
+    result, _ = apply(clone, default_branch="develop")
+    assert result["status"] == "updated", result["actions"]
+    assert remote_head(origin, "develop") == before
+    assert result["saved"]["branch"] == WIP and config(clone, "branch.develop.sync") is None
+
+
 def test_deleted_upstream_is_not_recreated(origin, clone):
     feature(clone, "merged")
     git(origin.bare, "branch", "-D", "merged")
