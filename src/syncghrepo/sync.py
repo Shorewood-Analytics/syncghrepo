@@ -32,7 +32,6 @@ from .run import Git, Result, Runner
 BACKUP_PREFIX = "refs/syncghrepo/backup"
 OPT_IN = ("sync", "syncNewFiles")
 STATUS_FAILED = "git status failed; secret check and file limit not run, clone left alone"
-STATUS_CMD = "git " + " ".join(save.CHANGED_PATHS_STATUS)
 
 
 def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | None, str]:
@@ -111,10 +110,6 @@ def process(
         extra = {"status": status, "note": note, "fork": fork, "can_push": can_push}
         return {**inspect(), **report, **extra}
 
-    def status_failed() -> dict:
-        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
-        return finish("error", STATUS_FAILED)
-
     def done() -> dict:
         if report["conflicts"]:
             if dry_run:
@@ -158,34 +153,34 @@ def process(
     if not info["head"]:
         return finish("skipped", f"no commits yet on {info['branch']}; left alone")
 
-    # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
-    submodules = save.changed_submodules(git) or {}
-    # If git status fails the check cannot run, so the clone is skipped too.
-    held = save.held_back(git, path, synced, submodules)
-    if held is None:
-        return status_failed()
-    report["held_back"] = held
-    if held:
-        files = ", ".join(h["path"] for h in held[:5])
-        return finish(
-            "held-back", f"files that must not be auto-committed ({files}); clone skipped"
-        )
+    try:
+        # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
+        submodules = save.changed_submodules(git)
+        held = save.held_back(git, path, synced, submodules)
+        report["held_back"] = held
+        if held:
+            files = ", ".join(h["path"] for h in held[:5])
+            return finish(
+                "held-back", f"files that must not be auto-committed ({files}); clone skipped"
+            )
 
-    # 2. Forks: bring the fork on GitHub up to date with its parent (never --force).
-    if fork and can_push:
-        cmd = f"gh repo sync {fork}"
-        act(cmd) if dry_run else act(cmd, runner(["gh", "repo", "sync", fork], where))
+        # 2. Forks: bring the fork on GitHub up to date with its parent (never --force).
+        if fork and can_push:
+            cmd = f"gh repo sync {fork}"
+            act(cmd) if dry_run else act(cmd, runner(["gh", "repo", "sync", fork], where))
 
-    # 3. Fetch. Without fetch, a dry run uses remote-tracking refs as of the last fetch.
-    if not dry_run or fetch:
-        act("git fetch --prune", git("fetch", "--quiet", "--prune"))
-        info = inspect()
+        # 3. Fetch. Without fetch, a dry run uses remote-tracking refs as of the last fetch.
+        if not dry_run or fetch:
+            act("git fetch --prune", git("fetch", "--quiet", "--prune"))
+            info = inspect()
+        listed = save.changed_paths(git)
+    except save.StatusFailed as err:
+        # The secret check or the file limit cannot run, so the clone is skipped too.
+        act(err.cmd, ok=False, note=f"{STATUS_FAILED}: {err.detail}")
+        return finish("error", STATUS_FAILED)
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
     # A submodule with only its own files changed: nothing the parent can commit.
-    listed = save.changed_paths(git)
-    if listed is None:
-        return status_failed()
     files = [f for f in listed if f not in submodules]
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (
@@ -353,9 +348,12 @@ def process(
         """Whether every file is in a new commit. git-sync can exit 0 when its own
         commit was refused (a commit hook, signing, no identity): it only checks for
         unstaged changes afterwards, and the refused files are left staged."""
-        remaining = save.changed_paths(git)
+        try:
+            remaining = save.changed_paths(git)
+        except save.StatusFailed:
+            return False  # cannot tell, so not committed
         moved = git.out("rev-parse", "HEAD") != head_before
-        return remaining is not None and moved and not set(files) & set(remaining)
+        return moved and not set(files) & set(remaining)
 
     head_before = git.out("rev-parse", "HEAD")
     # git-sync decides whether to commit from git status, which status.showUntrackedFiles=no
@@ -369,7 +367,10 @@ def process(
     result = runner([git_sync], where, env)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
     if result.ok and files and not committed():
-        left = sorted(set(files) & set(save.changed_paths(git) or files))
+        try:
+            left = sorted(set(files) & set(save.changed_paths(git) or files))
+        except save.StatusFailed:
+            left = files  # cannot tell which, so all of them
         shown = ", ".join(left[:5]) + (" ..." if len(left) > 5 else "")
         note = f"auto-commit did not complete (a commit hook, signing or identity?); {shown}"
         act("git-sync", ok=False, note=note)

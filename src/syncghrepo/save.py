@@ -33,16 +33,26 @@ SECRET_TEXT = re.compile(
 )
 
 
-# The status call behind changed_paths(); sync.py logs it when the call fails.
-CHANGED_PATHS_STATUS = ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+class StatusFailed(Exception):
+    """git status failed: what changed is unknown, so nothing is safe to commit."""
+
+    def __init__(self, cmd: str, detail: str):
+        super().__init__(f"{cmd}: {detail}")
+        self.cmd = cmd  # the git status command line
+        self.detail = detail  # git's last line of output
 
 
-def changed_paths(git: Git) -> list[str] | None:
-    """Every path with uncommitted changes, including untracked (not ignored) files."""
-    result = git(*CHANGED_PATHS_STATUS)
+def status(git: Git, *args: str) -> str:
+    """git status output; raises StatusFailed if git status fails."""
+    result = git("status", *args)
     if not result.ok:
-        return None
-    fields = result.out.split("\0")
+        raise StatusFailed(" ".join(("git", "status", *args)), result.last_line())
+    return result.out
+
+
+def changed_paths(git: Git) -> list[str]:
+    """Every path with uncommitted changes, including untracked (not ignored) files."""
+    fields = status(git, "--porcelain=v1", "-z", "--untracked-files=all").split("\0")
     paths: list[str] = []
     i = 0
     while i < len(fields):
@@ -68,17 +78,15 @@ SUBMODULE_MOVED = (
 )
 
 
-def changed_submodules(git: Git) -> dict[str, bool] | None:
+def changed_submodules(git: Git) -> dict[str, bool]:
     """Submodules (gitlinks) that git status lists as changed: path -> whether the
     checked-out commit differs from the recorded one. False means only the files
     inside it changed, which the parent's git add -A never commits."""
     # Same untracked mode as changed_paths: it also decides whether a submodule's own
     # untracked files count as a change there.
-    result = git("status", "--porcelain=v2", "-z", "--untracked-files=all")
-    if not result.ok:
-        return None
+    out = status(git, "--porcelain=v2", "-z", "--untracked-files=all")
     found: dict[str, bool] = {}
-    fields = iter(result.out.split("\0"))
+    fields = iter(out.split("\0"))
     for entry in fields:
         kind, _, rest = entry.partition(" ")
         if kind not in ("1", "2"):
@@ -204,20 +212,18 @@ def held_back(
     root: Path,
     synced: set[Path] | None = None,
     submodules: dict[str, bool] | None = None,
-) -> list[dict] | None:
+) -> list[dict]:
     """Changed files that must never be committed: secret-looking or too large, a
     nested repo, or a submodule moved to another commit. A submodule whose own files
     changed is not held back: git add -A in the parent does not commit them.
 
-    None if git status failed: the check could not run, so nothing is safe to commit.
+    Raises StatusFailed if git status fails: the check could not run.
     """
     paths = changed_paths(git)
-    if paths is None:
-        return None
     subs = changed_submodules(git) if submodules is None else submodules
     found = []
     for rel in paths:
-        if subs and rel in subs:
+        if rel in subs:
             reason = SUBMODULE_MOVED if subs[rel] else None
         else:
             reason = hold_reason(root, rel, synced)
