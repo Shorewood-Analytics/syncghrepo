@@ -347,6 +347,24 @@ def test_real_conflict_is_aborted_and_nothing_is_lost(origin, clone):
     assert git(clone, "for-each-ref", "refs/syncghrepo").count("\n") == 0
 
 
+def test_failed_rebase_abort_is_an_error_not_nothing_lost(origin, clone):
+    diverge(origin, clone, {"a.txt": "upstream edit\n"}, {"a.txt": "my edit\n"})
+
+    def lock_index(cmd):  # e.g. an editor's git process holds the index lock
+        if "rebase" in cmd and "--abort" in cmd:
+            (clone / ".git" / "index.lock").write_text("")
+
+    result, _ = apply(clone, FakeRunner(git_hook=lock_index))
+
+    assert result["busy"] == "rebase"  # git rebase --abort failed: still mid-rebase
+    assert result["status"] == "error"
+    assert "still in progress" in result["note"] and "nothing lost" not in result["note"]
+    (abort,) = [a for a in result["actions"] if a["cmd"] == "git rebase --abort"]
+    assert abort["ok"] is False and "back as it was" not in abort["note"]
+    (backup,) = result["backup_refs"]
+    assert backup in result["note"]
+
+
 class RebaseStartsInsideGitSync(FakeRunner):
     """git-sync is about to run when someone starts a rebase: the race git-sync's exit 2
     (unsafe state, nothing done) reports."""

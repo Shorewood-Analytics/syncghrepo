@@ -103,6 +103,10 @@ def process(
         return {**inspect(), **report, **extra}
 
     def done() -> dict:
+        aborted = next((a for a in actions if a["cmd"] == "git rebase --abort"), None)
+        if aborted and aborted["ok"] is False:  # the clone is left mid-rebase
+            backup = ", ".join(report["backup_refs"]) or "none"
+            return finish("error", f"{aborted['note']}; backup: {backup}")
         if report["conflicts"]:
             if dry_run:
                 return finish("conflict", "predicted conflicts; the rebase would be aborted")
@@ -329,8 +333,13 @@ def process(
         if report["conflicts"]:
             names = ", ".join(c["path"] or "?" for c in report["conflicts"])
             act("git-sync", ok=False, note=f"rebase stopped on conflicts in {names}")
+            aborted = git("rebase", "--abort")
             act(
-                "git rebase --abort", git("rebase", "--abort"), "branch back as it was; backup kept"
+                "git rebase --abort",
+                aborted,
+                "branch back as it was; backup kept"
+                if aborted.ok
+                else "git rebase --abort failed, the rebase is still in progress",
             )
         else:
             act(
