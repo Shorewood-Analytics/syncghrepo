@@ -5,7 +5,7 @@ import pytest
 from conftest import GIT_SYNC
 
 from syncghrepo import gitsync
-from syncghrepo.run import Result
+from syncghrepo.run import Result, run
 
 INSTALLED = Path.home() / ".local" / "bin" / "git-sync"
 
@@ -40,3 +40,19 @@ def test_summary_and_did_something():
     assert gitsync.did_something(result)
     assert not gitsync.did_something(Result(0, "git-sync: In sync, all fine.\n"))
     assert gitsync.log(result)[-1] == "To github.com:x/y"
+
+
+def test_with_config_adds_after_pairs_already_in_the_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    assert gitsync.with_config("branch.x.remote", "origin") == {
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "branch.x.remote",
+        "GIT_CONFIG_VALUE_0": "origin",
+    }  # fmt: skip
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.name")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "Ben")
+    env = gitsync.with_config("branch.x.remote", "origin")
+    assert env["GIT_CONFIG_COUNT"] == "2" and env["GIT_CONFIG_KEY_1"] == "branch.x.remote"
+    seen = run(["git", "config", "--get-regexp", "^(user.name|branch.x.remote)$"], str(tmp_path),
+               env=env)  # fmt: skip
+    assert seen.out.splitlines() == ["user.name Ben", "branch.x.remote origin"]

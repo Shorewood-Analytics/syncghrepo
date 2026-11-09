@@ -237,13 +237,18 @@ def process(
                 f"secret-looking or oversized files in local commits ({names}); not pushed",
             )
 
-    # git-sync's own read-only check: refuses staged changes, odd file states, ...
-    if remote:
-        check = runner([git_sync, "-s", "-n", "check"], where)
-        act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
-        if not check.ok:
-            report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
-            return done()
+    # git-sync's own read-only check: refuses staged changes, odd file states, ... A branch
+    # with no remote yet (it gets origin below) is checked as if it had origin already.
+    check_cmd = [git_sync, "-s", "-n", "check"]
+    check = (
+        runner(check_cmd, where)
+        if remote
+        else runner(check_cmd, where, gitsync.with_config(f"branch.{branch}.remote", "origin"))
+    )
+    act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
+    if not check.ok:
+        report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
+        return done()
 
     # 5. Work on the default branch moves to a new wip/ branch first.
     if protected:

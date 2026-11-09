@@ -32,6 +32,18 @@ def find(explicit: str | None = None) -> str | None:
     return None
 
 
+def with_config(key: str, value: str) -> dict[str, str]:
+    """Environment that adds one git config setting for a command, writing nothing
+    (GIT_CONFIG_COUNT, git 2.31+), after any pairs already in the environment."""
+    count = os.environ.get("GIT_CONFIG_COUNT", "")
+    n = int(count) if count.isdigit() else 0
+    return {
+        "GIT_CONFIG_COUNT": str(n + 1),
+        f"GIT_CONFIG_KEY_{n}": key,
+        f"GIT_CONFIG_VALUE_{n}": value,
+    }
+
+
 def summary(result: Result) -> str:
     """git-sync's last own message ("In sync, all fine.", "Rebasing failed, ...")."""
     lines = [line[10:] for line in result.out.splitlines() if line.startswith("git-sync: ")]

@@ -274,6 +274,30 @@ def test_git_sync_refusal_is_reported_and_nothing_changes(origin, clone):
     assert result["git_sync"]["code"] == 1
 
 
+@pytest.mark.parametrize("branch", ["idea", "main"])
+def test_git_sync_check_runs_first_for_a_branch_with_no_remote(origin, clone, branch):
+    """idea is local only; main has lost its upstream config. Both would be pushed (main
+    via a wip/ branch) before git-sync ran, so its read-only check must come first."""
+    if branch == "main":
+        git(clone, "branch", "--unset-upstream")
+    else:
+        git(clone, "switch", "-q", "-c", branch)
+    commit(clone, "i.txt", "idea\n")
+    (clone / "staged.txt").write_text("staged\n")
+    git(clone, "add", "staged.txt")  # git-sync refuses staged changes
+    refs = git(clone, "for-each-ref")
+
+    result, runner = apply(clone)
+
+    assert result["status"] == "error" and "handle manually" in result["note"]
+    assert runner.git_sync_calls() == [["-s", "-n", "check"]]
+    assert git(clone, "branch", "--show-current") == branch
+    assert git(clone, "for-each-ref") == refs  # nothing pushed, no wip/ branch
+    assert git(origin.bare, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+    assert "branch.idea" not in git(clone, "config", "--list")
+    assert_safe(runner)
+
+
 def diverge(origin, clone, files_upstream: dict, files_mine: dict):
     """Put Ben's clone on a pushed feature branch, then change both sides."""
     feature(clone)
