@@ -32,7 +32,7 @@ from .run import Git, Result, Runner
 BACKUP_PREFIX = "refs/syncghrepo/backup"
 OPT_IN = ("sync", "syncNewFiles")
 STATUS_FAILED = "git status failed; secret check and file limit not run, clone left alone"
-STATUS_CMD = "git status --porcelain=v1 -z --untracked-files=all"
+STATUS_CMD = "git " + " ".join(save.CHANGED_PATHS_STATUS)
 
 
 def make_backup(git: Git, files: list[str], moment: datetime) -> tuple[str | None, str]:
@@ -111,6 +111,10 @@ def process(
         extra = {"status": status, "note": note, "fork": fork, "can_push": can_push}
         return {**inspect(), **report, **extra}
 
+    def status_failed() -> dict:
+        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
+        return finish("error", STATUS_FAILED)
+
     def done() -> dict:
         if report["conflicts"]:
             if dry_run:
@@ -159,11 +163,10 @@ def process(
     # If git status fails the check cannot run, so the clone is skipped too.
     held = save.held_back(git, path, synced, submodules)
     if held is None:
-        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
-        return finish("error", STATUS_FAILED)
+        return status_failed()
     report["held_back"] = held
-    if report["held_back"]:
-        files = ", ".join(h["path"] for h in report["held_back"][:5])
+    if held:
+        files = ", ".join(h["path"] for h in held[:5])
         return finish(
             "held-back", f"files that must not be auto-committed ({files}); clone skipped"
         )
@@ -182,8 +185,7 @@ def process(
     # A submodule with only its own files changed: nothing the parent can commit.
     listed = save.changed_paths(git)
     if listed is None:
-        act(STATUS_CMD, ok=False, note=STATUS_FAILED)
-        return finish("error", STATUS_FAILED)
+        return status_failed()
     files = [f for f in listed if f not in submodules]
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (

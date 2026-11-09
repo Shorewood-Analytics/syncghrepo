@@ -33,9 +33,13 @@ SECRET_TEXT = re.compile(
 )
 
 
+# The status call behind changed_paths(); sync.py logs it when the call fails.
+CHANGED_PATHS_STATUS = ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+
+
 def changed_paths(git: Git) -> list[str] | None:
     """Every path with uncommitted changes, including untracked (not ignored) files."""
-    result = git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+    result = git(*CHANGED_PATHS_STATUS)
     if not result.ok:
         return None
     fields = result.out.split("\0")
