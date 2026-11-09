@@ -218,12 +218,15 @@ def process(
         return done()
 
     # git-sync's own read-only check: refuses staged changes, odd file states, ...
-    if remote:
-        check = runner([git_sync, "-s", "-n", "check"], where)
-        act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
-        if not check.ok:
-            report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
-            return done()
+    # It runs before anything is changed, also on a branch with no remote yet (it
+    # would stop at "no configured remote"): origin is the remote it is pushed to.
+    probe = None if remote else gitsync.config_env((f"branch.{branch}.remote", "origin"))
+    command = [git_sync, "-s", "-n", "check"]
+    check = runner(command, where, probe) if probe else runner(command, where)
+    act("git-sync -s -n check", ok=check.ok, note=gitsync.summary(check))
+    if not check.ok:
+        report["git_sync"] = {"code": check.code, "log": gitsync.log(check)}
+        return done()
 
     # 5. Work on the default branch moves to a new wip/ branch first.
     if protected:

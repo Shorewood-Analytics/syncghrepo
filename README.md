@@ -65,8 +65,9 @@ it and reports what happened:
    is first pushed with `-u`. Branches whose upstream was deleted (merged PRs) are
    not recreated. Clean, in-sync clones are not touched, not even their config.
 4. **git-sync check first.** `git-sync -s -n check` (read-only) runs before
-   anything is changed, so a clone it would refuse (staged changes, a merge in
-   progress, ...) is left untouched and its message reported.
+   anything is changed, also on a branch that has no remote branch yet, so a clone
+   it would refuse (staged changes, a merge in progress, ...) is left untouched and
+   its message reported.
 5. **Backup, then git-sync.** If the branch is behind its upstream and has local
    work, a backup ref of HEAD plus any uncommitted files is made first:
    `refs/syncghrepo/backup/<YYYYMMDDTHHMMSS>` (reused when a backup of the same

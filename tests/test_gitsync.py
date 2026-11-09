@@ -40,3 +40,16 @@ def test_summary_and_did_something():
     assert gitsync.did_something(result)
     assert not gitsync.did_something(Result(0, "git-sync: In sync, all fine.\n"))
     assert gitsync.log(result)[-1] == "To github.com:x/y"
+
+
+def test_config_env_adds_after_existing_entries(monkeypatch):
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    assert gitsync.config_env(("a.b", "1")) == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "a.b",
+        "GIT_CONFIG_VALUE_0": "1",
+    }
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")  # e.g. the user's own entries 0 and 1
+    env = gitsync.config_env(("a.b", "1"), ("c.d", "2"))
+    assert env["GIT_CONFIG_COUNT"] == "4"
+    assert (env["GIT_CONFIG_KEY_2"], env["GIT_CONFIG_VALUE_3"]) == ("a.b", "2")

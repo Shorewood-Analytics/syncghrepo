@@ -208,6 +208,34 @@ def test_git_sync_refusal_is_reported_and_nothing_changes(origin, clone):
     assert result["git_sync"]["code"] == 1
 
 
+@pytest.mark.parametrize("where", ["local-only branch", "default branch without upstream"])
+def test_git_sync_refusal_without_a_remote_changes_nothing(origin, clone, where):
+    # git-sync's check needs branch.<b>.remote; without one it must still run first,
+    # before the branch is pushed, switched to wip/ or opted in.
+    if where == "local-only branch":
+        git(clone, "switch", "-q", "-c", "feat")
+    else:
+        git(clone, "branch", "--unset-upstream")
+    branch = git(clone, "branch", "--show-current")
+    (clone / "a.txt").write_text("staged\n")
+    git(clone, "add", "a.txt")  # git-sync refuses staged changes
+    (clone / "b.txt").write_text("untracked\n")
+    remote_before = git(origin.bare, "for-each-ref", "--format=%(refname) %(objectname)")
+    config_before = git(clone, "config", "--list", "--local")
+
+    planned = plan(clone)
+    result, runner = apply(clone)
+
+    for report in (planned, result):
+        assert report["status"] == "error", report["actions"]
+        assert "handle manually" in report["note"]
+        assert cmds(report)[-1] == "git-sync -s -n check"
+    assert runner.git_sync_calls() == [["-s", "-n", "check"]]
+    assert git(origin.bare, "for-each-ref", "--format=%(refname) %(objectname)") == remote_before
+    assert git(clone, "config", "--list", "--local") == config_before
+    assert git(clone, "branch", "--show-current") == branch
+
+
 def diverge(origin, clone, files_upstream: dict, files_mine: dict):
     """Put Ben's clone on a pushed feature branch, then change both sides."""
     feature(clone)
