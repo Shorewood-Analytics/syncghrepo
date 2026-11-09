@@ -589,6 +589,10 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
         present = {key for _, key in clone_keys} | {key for _, key in found["nested_keys"]}
         records = cloner.plan(runner, repos, me, present, cloner.clone_dir())
 
+    # Repos synced on their own: every clone and nested repo found. An untracked
+    # nested repo outside this set (hidden or build folder, too deep) is not.
+    synced = {path for path, _ in clone_keys} | {i["path"] for i, _ in found["nested_keys"]}
+
     def run_clone(path: Path, key: str, info: dict | None = None) -> dict:
         remote = repos[key]["remote"] or {}
         can_push = bool(remote.get("can_push")) and not repos[key]["archived"]
@@ -602,6 +606,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
             stale_days=STALE_DAYS,
             now=now,
             default_branch=repos[key]["default_branch"],
+            synced=synced,
         )
         result["nested_in"] = str(info["parent"]) if info else None
         result["submodule"] = bool(info and info["submodule"])
@@ -619,6 +624,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
                 job.result()
                 if record["status"] == "cloned":
                     clone_keys.append((Path(record["path"]).resolve(), record["name"].lower()))
+                    synced.add(clone_keys[-1][0])
                 elif record["status"] == "failed":
                     errors.append(f"gh repo clone {record['name']} failed: {record['note']}")
 
@@ -648,6 +654,7 @@ def build_report(args: argparse.Namespace, runner: Runner, now: float | None = N
                 (info, register(runner, repos, info["path"]))
                 for info in local.nested_repos(runner, top)
             ]
+            synced.update(info["path"] for info, _ in nested_keys)
         else:
             nested_keys = found["nested_keys"]
         new = [key for _, key in nested_keys if "clones" not in repos[key]]

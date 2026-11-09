@@ -65,11 +65,14 @@ def process(
     stale_days: int = 30,
     now: float | None = None,
     default_branch: str | None = None,
+    synced: set[Path] | None = None,
 ) -> dict:
     """Process one clone. fetch makes a dry run fetch first (it only updates
     remote-tracking refs), so its plan reflects what is on the remote now.
     default_branch is the repo's default branch on GitHub, if known: it and the
-    clone's origin/HEAD are both protected, and it is the one fast-forwarded."""
+    clone's origin/HEAD are both protected, and it is the one fast-forwarded.
+    synced is the set of repos synced on their own (every discovered clone), if
+    known: an untracked nested repo outside it is reported as not synced."""
     now = time.time() if now is None else now
     moment = datetime.fromtimestamp(now).astimezone()
     git = Git(runner, path)
@@ -149,10 +152,13 @@ def process(
         return finish("skipped", f"no commits yet on {info['branch']}; left alone")
 
     # 1. Secret check: a hit skips the whole clone (nothing saved, synced or pushed).
-    report["held_back"] = save.held_back(git, path)
+    submodules = save.changed_submodules(git) or {}
+    report["held_back"] = save.held_back(git, path, synced, submodules)
     if report["held_back"]:
         files = ", ".join(h["path"] for h in report["held_back"][:5])
-        return finish("held-back", f"secret-looking or oversized files ({files}); clone skipped")
+        return finish(
+            "held-back", f"files that must not be auto-committed ({files}); clone skipped"
+        )
 
     # 2. Forks: bring the fork on GitHub up to date with its parent (never --force).
     if fork and can_push:
@@ -165,7 +171,8 @@ def process(
         info = inspect()
     branch, upstream = info["branch"], info["upstream"]
     ahead, behind = info["ahead"] or 0, info["behind"] or 0
-    files = save.changed_paths(git) or []
+    # A submodule with only its own files changed: nothing the parent can commit.
+    files = [f for f in save.changed_paths(git) or [] if f not in submodules]
     if len(files) > save.MAX_FILES:
         report["save_skipped"] = (
             f"{len(files)} files changed (over {save.MAX_FILES}; missing .gitignore?)"
@@ -308,7 +315,10 @@ def process(
         return remaining is not None and moved and not set(files) & set(remaining)
 
     head_before = git.out("rev-parse", "HEAD")
-    result = runner([git_sync], where)
+    # git-sync checks the tree is clean after its commit with git diff, which counts
+    # edits inside a submodule; the parent cannot commit those.
+    env = gitsync.config_env(("diff.ignoreSubmodules", "dirty")) if submodules else None
+    result = runner([git_sync], where, env) if env else runner([git_sync], where)
     report["git_sync"] = {"code": result.code, "log": gitsync.log(result)}
     if result.ok and files and not committed():
         left = sorted(set(files) & set(save.changed_paths(git) or files))
@@ -332,7 +342,7 @@ def process(
                 change=True,
                 note=f"rebase stopped; auto-resolved {len(report['resolved'])} conflict(s)",
             )
-            again = runner([git_sync], where)
+            again = runner([git_sync], where, env) if env else runner([git_sync], where)
             report["git_sync"] = {"code": again.code, "log": gitsync.log(again)}
             act("git-sync", ok=again.ok, note=gitsync.summary(again), change=True)
     else:

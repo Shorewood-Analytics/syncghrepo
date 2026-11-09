@@ -53,8 +53,44 @@ def changed_paths(git: Git) -> list[str] | None:
     return sorted(set(paths))
 
 
-def hold_reason(root: Path, rel: str) -> str | None:
-    """Why this path must not be auto-committed, or None if it is safe."""
+NESTED_SYNCED = "a nested git repo (synced on its own); .gitignore it or make it a submodule"
+NESTED_UNSYNCED = (
+    "a nested git repo that is not synced (in a hidden or build folder, or too deep); "
+    ".gitignore it, move it or make it a submodule"
+)
+SUBMODULE_MOVED = (
+    "a submodule at another commit than this clone records (git add -A would commit "
+    "that); commit the submodule change or run git submodule update"
+)
+
+
+def changed_submodules(git: Git) -> dict[str, bool] | None:
+    """Submodules (gitlinks) that git status lists as changed: path -> whether the
+    checked-out commit differs from the recorded one. False means only the files
+    inside it changed, which the parent's git add -A never commits."""
+    # Same untracked mode as changed_paths: it also decides whether a submodule's own
+    # untracked files count as a change there.
+    result = git("status", "--porcelain=v2", "-z", "--untracked-files=all")
+    if not result.ok:
+        return None
+    found: dict[str, bool] = {}
+    fields = iter(result.out.split("\0"))
+    for entry in fields:
+        kind, _, rest = entry.partition(" ")
+        if kind not in ("1", "2"):
+            continue
+        # 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>; 2 adds <score> and a source path
+        parts = rest.split(" ", 8 if kind == "2" else 7)
+        if kind == "2":
+            next(fields, None)
+        if len(parts) >= 8 and parts[1].startswith("S"):
+            found[parts[-1]] = parts[1][1] == "C"
+    return found
+
+
+def hold_reason(root: Path, rel: str, synced: set[Path] | None = None) -> str | None:
+    """Why this path must not be auto-committed, or None if it is safe. synced: the
+    repos that are synced on their own (discovered clones), if known."""
     if SECRET_NAME.search(rel):
         return "secret-looking file name"
     path = root / rel
@@ -63,8 +99,11 @@ def hold_reason(root: Path, rel: str) -> str | None:
     except OSError:
         return None  # deleted: committing the deletion is safe
     if stat.S_ISDIR(info.st_mode) and (path / ".git").exists():
-        # git add -A would embed it as a gitlink; it is synced on its own instead.
-        return "a nested git repo (synced on its own); .gitignore it or make it a submodule"
+        # git add -A would embed it as a gitlink; it is synced on its own instead,
+        # unless discovery skipped it (hidden or build folder, too deep).
+        if synced is not None and path.resolve() not in synced:
+            return NESTED_UNSYNCED
+        return NESTED_SYNCED
     if not stat.S_ISREG(info.st_mode):
         return None
     if info.st_size > MAX_FILE_BYTES:
@@ -97,7 +136,23 @@ def wip_branch(git: Git, day: str) -> str:
     raise RuntimeError("no free wip branch name")
 
 
-def held_back(git: Git, root: Path) -> list[dict]:
-    """Changed files that must never be committed: secret-looking or too large."""
+def held_back(
+    git: Git,
+    root: Path,
+    synced: set[Path] | None = None,
+    submodules: dict[str, bool] | None = None,
+) -> list[dict]:
+    """Changed files that must never be committed: secret-looking or too large, a
+    nested repo, or a submodule moved to another commit. A submodule whose own files
+    changed is not held back: git add -A in the parent does not commit them."""
     paths = changed_paths(git) or []
-    return [{"path": p, "reason": r} for p in paths if (r := hold_reason(root, p))]
+    subs = changed_submodules(git) if submodules is None else submodules
+    found = []
+    for rel in paths:
+        if subs and rel in subs:
+            reason = SUBMODULE_MOVED if subs[rel] else None
+        else:
+            reason = hold_reason(root, rel, synced)
+        if reason:
+            found.append({"path": rel, "reason": reason})
+    return found

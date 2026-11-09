@@ -129,11 +129,17 @@ nested repos; they are listed under their main clone.
   recorded commit. It is skipped (and the reason noted) if it could move local work:
   a submodule on a branch, with uncommitted changes, with commits on no remote, or
   in a merge conflict. A submodule on a detached HEAD with nothing unsaved is
-  `up-to-date`, not `skipped`.
+  `up-to-date`, not `skipped`. Files changed inside a submodule do not hold back
+  its parent (the parent's `git add -A` never commits them). A submodule checked out
+  at another commit than the parent records does (`held_back` reason "a submodule at
+  another commit ..."): `git add -A` would commit that commit as the new pointer,
+  which could undo a pointer update the parent pulled, so a person decides.
 - **Untracked nested clones.** A nested clone that the parent does not ignore would
   be embedded by `git add -A` as a gitlink, so the parent is held back (`held_back`
   reason "a nested git repo") until the folder is in `.gitignore` or made a
-  submodule. The nested clone itself is still synced.
+  submodule. The nested clone itself is still synced, unless it is in a hidden or
+  build folder or more than 4 levels down, where nested repos are not searched for:
+  then the reason says it is not synced.
 
 ## API-only mode (`--api`)
 
@@ -279,7 +285,7 @@ Every item has exactly these keys; absent values are `null` (`flags` is `[]`).
 | `conflict` | `path:branch` | pull aborted on conflicts that need a person; `detail` lists files and the backup ref |
 | `error` | `path:branch` | a step failed (see the clone's `actions`) |
 | `skipped` | `path:branch` | clone left alone: merge/rebase in progress, detached HEAD or no commits |
-| `held_back` | `path:file` | secret-looking or oversized file; the whole clone was skipped |
+| `held_back` | `path:file` | secret-looking or oversized file, untracked nested repo or moved submodule; the whole clone was skipped |
 | `save_skipped` | `path:branch` | over 2,000 changed files (a missing `.gitignore`?); the whole clone was skipped; `detail` says how many |
 | `not_pushed` | `path:branch` | work not synced or pushed: commits on the default branch, a diverged default branch, deleted upstream, no push access, or a branch git-sync cannot handle |
 | `unpushed_branch` | `path:branch` | another local branch with commits on no remote |
